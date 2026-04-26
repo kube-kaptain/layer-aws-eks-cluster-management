@@ -1,4 +1,4 @@
-apiVersion: kaptain.org/1.15
+apiVersion: kaptain.org/1.16
 kind: basic-quality-and-versioning
 metadata:
   description: "AWS EKS cluster management build flow as a postVersionsAndNaming hook"
