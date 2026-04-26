@@ -1,0 +1,21 @@
+apiVersion: kaptain.org/1.15
+kind: basic-quality-and-versioning
+metadata:
+  description: "AWS EKS cluster management build flow as a postVersionsAndNaming hook"
+
+spec:
+  main:
+    hooks:
+      postVersionsAndNaming: kaptain-out/aws-eks-cluster-management-orchestrator.bash
+
+layer-payload:
+  - source: /aws-eks-cluster-management-orchestrator.bash
+    destination: kaptain-out
+  - source: /aws-eks-cluster-management-defaults.bash
+    destination: kaptain-out
+  - source: /aws-eks-cluster-management-prepare.bash
+    destination: kaptain-out
+  - source: /aws-eks-cluster-management-pre-build-validate.bash
+    destination: kaptain-out
+  - source: /aws-eks-cluster-management-post-build-validate.bash
+    destination: kaptain-out
