@@ -100,26 +100,26 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # === Source defaults ===
 
 # shellcheck source=src/scripts/defaults/platform.bash
-source "${SCRIPT_DIR}/../defaults/platform.bash"
+source "${BUILD_SCRIPTS_DIR}/defaults/platform.bash"
 # shellcheck source=src/scripts/lib/log.bash
-source "${SCRIPT_DIR}/../lib/log.bash"
+source "${BUILD_SCRIPTS_DIR}/lib/log.bash"
 # shellcheck source=src/scripts/defaults/output-sub-path.bash
-source "${SCRIPT_DIR}/../defaults/output-sub-path.bash"
+source "${BUILD_SCRIPTS_DIR}/defaults/output-sub-path.bash"
 # shellcheck source=src/scripts/defaults/docker-dockerfile.bash
-source "${SCRIPT_DIR}/../defaults/docker-dockerfile.bash"
+source "${BUILD_SCRIPTS_DIR}/defaults/docker-dockerfile.bash"
 # shellcheck source=src/scripts/defaults/docker-common.bash
-source "${SCRIPT_DIR}/../defaults/docker-common.bash"
+source "${BUILD_SCRIPTS_DIR}/defaults/docker-common.bash"
 # shellcheck source=src/scripts/defaults/tokens.bash
-source "${SCRIPT_DIR}/../defaults/tokens.bash"
-# shellcheck source=src/scripts/defaults/aws-eks-cluster-management.bash
-source "${SCRIPT_DIR}/../defaults/aws-eks-cluster-management.bash"
+source "${BUILD_SCRIPTS_DIR}/defaults/tokens.bash"
+# shellcheck source=aws-eks-cluster-management-defaults.bash
+source "${SCRIPT_DIR}/aws-eks-cluster-management-defaults.bash"
 
 # === Source libs ===
 
 # shellcheck source=src/scripts/lib/token-format.bash
-source "${SCRIPT_DIR}/../lib/token-format.bash"
+source "${BUILD_SCRIPTS_DIR}/lib/token-format.bash"
 # shellcheck source=src/scripts/lib/output-var.bash
-source "${SCRIPT_DIR}/../lib/output-var.bash"
+source "${BUILD_SCRIPTS_DIR}/lib/output-var.bash"
 
 # === Helper functions ===
 
