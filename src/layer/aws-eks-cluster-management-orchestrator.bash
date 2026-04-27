@@ -39,14 +39,27 @@
 #
 # Hook scripts are paths relative to repo root and must be executable.
 #
-# Inputs (environment, with sensible defaults):
-#   BUILDON_SCRIPTS_DIR  - Path to buildon scripts root
-#                          (default: .github/buildon-github-actions/src/scripts)
+# Inputs (required environment):
+#   BUILD_SCRIPTS_REPO_ROOT - Path to the build scripts repo root
+#                             (provided by the build system)
 
 set -euo pipefail
 
+if [[ -z "${BUILD_SCRIPTS_REPO_ROOT:-}" ]]; then
+  echo "ERROR: BUILD_SCRIPTS_REPO_ROOT is not set." >&2
+  echo "       This variable must be provided by the build system and points to" >&2
+  echo "       the root of the build scripts repo (e.g. buildon-github-actions)." >&2
+  exit 1
+fi
+if [[ ! -d "${BUILD_SCRIPTS_REPO_ROOT}/src/scripts" ]]; then
+  echo "ERROR: BUILD_SCRIPTS_REPO_ROOT does not contain src/scripts:" >&2
+  echo "       ${BUILD_SCRIPTS_REPO_ROOT}/src/scripts" >&2
+  exit 1
+fi
+
 LAYER_PAYLOAD_DIR="${OUTPUT_SUB_PATH:-kaptain-out}"
-BUILDON_SCRIPTS_DIR="${BUILDON_SCRIPTS_DIR:-.github/buildon-github-actions/src/scripts}"
+BUILD_SCRIPTS_DIR="${BUILD_SCRIPTS_REPO_ROOT}/src/scripts"
+export BUILD_SCRIPTS_DIR
 FINAL_KPM="kaptainpm/final/KaptainPM.yaml"
 
 read_user_data() {
@@ -138,7 +151,7 @@ run_optional_user_hook "user pre-docker-prepare" "${USER_PRE_DOCKER_PREPARE_SCRI
 run_step "pre-build-validate" bash "${LAYER_PAYLOAD_DIR}/aws-eks-cluster-management-pre-build-validate.bash"
 
 # Step 5: buildon docker-build-dockerfile
-run_step "docker-build-dockerfile" bash "${BUILDON_SCRIPTS_DIR}/main/docker-build-dockerfile"
+run_step "docker-build-dockerfile" bash "${BUILD_SCRIPTS_DIR}/main/docker-build-dockerfile"
 
 # Step 6: post-build-validate
 run_step "post-build-validate" bash "${LAYER_PAYLOAD_DIR}/aws-eks-cluster-management-post-build-validate.bash"
