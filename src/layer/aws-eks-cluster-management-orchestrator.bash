@@ -111,9 +111,21 @@ run_step() {
   local label="$1"
   shift
   banner "${label}"
-  if ! "$@"; then
+
+  local step_output_file="${LAYER_PAYLOAD_DIR}/reference-script-output/${label}"
+  mkdir -p "$(dirname "${step_output_file}")"
+  : > "${step_output_file}"
+
+  if ! REFERENCE_SCRIPT_OUTPUT="${step_output_file}" "$@"; then
     echo "ERROR: ${label} failed (exit $?)" >&2
     exit 1
+  fi
+
+  if [[ -s "${step_output_file}" ]]; then
+    while IFS= read -r line; do
+      [[ -z "${line}" ]] && continue
+      export "${line%%=*}"="${line#*=}"
+    done < "${step_output_file}"
   fi
 }
 
