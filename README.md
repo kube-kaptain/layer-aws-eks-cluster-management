@@ -22,6 +22,28 @@ Projects that reference this layer inherit:
 - **Layer payload** - delivers the orchestrator, defaults, prepare, and
   validate scripts to `kaptain-out/`
 
+## Docker Architecture Support
+
+Docker platform configuration is respected. The layer defaults it to both amd64
+and arm64 but if you want faster builds and only need one you can override it
+in the consuming project's KaptainPM.yaml:
+
+```
+ spec:
+   main:
+    docker:
+      platform: linux/amd64
+```
+
+or 
+
+```
+ spec:
+   main: 
+    docker:
+      platform: linux/arm64
+```
+
 ## Configuring the user hook slots
 
 The orchestrator reads two optional hook paths from the consuming project's
