@@ -16,8 +16,8 @@
 # Base image parts (FROM line)
 EKS_BASE_IMAGE_REGISTRY="${EKS_BASE_IMAGE_REGISTRY:-ghcr.io}"
 EKS_BASE_IMAGE_NAMESPACE="${EKS_BASE_IMAGE_NAMESPACE:-kube-kaptain}"
-EKS_BASE_IMAGE_NAME="${EKS_BASE_IMAGE_NAME:-aws/aws-eks-cluster-management}"
-EKS_BASE_IMAGE_TAG="${EKS_BASE_IMAGE_TAG:-1.10}"
+EKS_BASE_IMAGE_NAME="${EKS_BASE_IMAGE_NAME:-image/image-aws-eks-cluster-management}"
+EKS_BASE_IMAGE_TAG="${EKS_BASE_IMAGE_TAG:-1.13}"
 
 # Networking switches
 EKS_PRIVATE_NETWORKING="${EKS_PRIVATE_NETWORKING:-true}"

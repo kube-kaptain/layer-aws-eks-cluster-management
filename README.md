@@ -4,6 +4,9 @@ Kaptain config layer providing the full AWS EKS cluster management build flow
 as a `postVersionsAndNaming` hook on top of the standard
 `basic-quality-and-versioning` workflow.
 
+For information on how the image works in use (commands, maintenance flows,
+cluster creation/deletion), see [Image AWS EKS Cluster Management](https://github.com/kube-kaptain/image-aws-eks-cluster-management).
+
 Projects that reference this layer inherit:
 
 - **EKS cluster yaml generation** - `cluster.yaml` and optional
