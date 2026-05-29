@@ -56,14 +56,12 @@ setup() {
     skip "yq not installed"
   fi
 
-  local base_dir
-  base_dir=$(create_test_dir "eks-post-validate")
-  # Clean stale artifacts from previous runs (create_test_dir reuses paths)
-  rm -rf "$base_dir"
-  mkdir -p "$base_dir"
+  local sandbox_rel
+  sandbox_rel=$(create_test_sandbox "target")
+  local base_dir="${PROJECT_ROOT}/${sandbox_rel%/target}"
   export TEST_BASE_DIR="$base_dir"
   export GITHUB_OUTPUT="$base_dir/github-output"
-  export OUTPUT_SUB_PATH="$base_dir/target"
+  export OUTPUT_SUB_PATH="$sandbox_rel"
   export CONFIG_SUB_PATH="$base_dir/src/config"
 
   # Required env vars
@@ -963,4 +961,95 @@ YAML
   run "$SCRIPTS_DIR/aws-eks-cluster-management-post-build-validate"
   [ "$status" -ne 0 ]
   assert_output_contains "entries but expected 2"
+}
+
+# === Pod identity associations: substituted-ARN checks ===
+
+# Helper: seed canonical pod-identity state with one managed + one external entry
+# and inject the matching associations block into the substituted cluster.yaml.
+seed_pod_identity_default() {
+  local context_dir="$OUTPUT_SUB_PATH/docker/substituted"
+  local ev_dir="$OUTPUT_SUB_PATH/aws-eks-cluster-management/expected-values"
+
+  printf '%s' "2" > "$ev_dir/pod-identity-count"
+  printf '%s\n%s\n' "karpenter-aws" "external-dns" > "$ev_dir/pod-identity-keys"
+  printf '%s\n%s\n' "managed" "external" > "$ev_dir/pod-identity-modes"
+  printf '%s' "123456789012" > "$ev_dir/aws-account-id"
+
+  yq -i '.iam.podIdentityAssociations = [
+    {"namespace": "kube-system", "serviceAccountName": "karpenter", "roleARN": "arn:aws:iam::123456789012:role/test-cluster-kube-system-karpenter", "tags": {"kaptain.org/managed-by": "test-cluster", "kaptain.org/association-key": "karpenter-aws"}},
+    {"namespace": "kube-system", "serviceAccountName": "external-dns", "roleARN": "arn:aws:iam::999999999999:role/SharedExternalDnsRole", "tags": {"kaptain.org/managed-by": "test-cluster", "kaptain.org/association-key": "external-dns"}}
+  ]' "$context_dir/cluster.yaml"
+  yq -i '.addons += [{"name": "eks-pod-identity-agent", "version": "latest"}]' "$context_dir/cluster.yaml"
+}
+
+@test "post-build: pod-identity happy path (managed + existing-role) passes" {
+  seed_pod_identity_default
+
+  run "$SCRIPTS_DIR/aws-eks-cluster-management-post-build-validate"
+  [ "$status" -eq 0 ]
+  assert_output_contains "all checks passed"
+}
+
+@test "post-build: pod-identity role name overflow fails with override hint" {
+  seed_pod_identity_default
+  local context_dir="$OUTPUT_SUB_PATH/docker/substituted"
+
+  # 65-char role name in the managed entry triggers the length check.
+  local long_role="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab"  # 65 chars
+  yq -i "(.iam.podIdentityAssociations[] | select(.tags.\"kaptain.org/association-key\" == \"karpenter-aws\")).roleARN = \"arn:aws:iam::123456789012:role/${long_role}\"" "$context_dir/cluster.yaml"
+
+  run "$SCRIPTS_DIR/aws-eks-cluster-management-post-build-validate"
+  [ "$status" -ne 0 ]
+  assert_output_contains "exceeds limit 64"
+  assert_output_contains "PodIdentityAssociationKarpenterAws"
+}
+
+@test "post-build: pod-identity managed-mode cross-account ARN fails" {
+  seed_pod_identity_default
+  local context_dir="$OUTPUT_SUB_PATH/docker/substituted"
+
+  # Point the managed entry at a different account.
+  yq -i '(.iam.podIdentityAssociations[] | select(.tags."kaptain.org/association-key" == "karpenter-aws")).roleARN = "arn:aws:iam::222222222222:role/test-cluster-kube-system-karpenter"' "$context_dir/cluster.yaml"
+
+  run "$SCRIPTS_DIR/aws-eks-cluster-management-post-build-validate"
+  [ "$status" -ne 0 ]
+  assert_output_contains "managed-mode ARN points at account '222222222222'"
+  assert_output_contains "Cross-account is only allowed"
+}
+
+@test "post-build: pod-identity missing managed-by tag fails" {
+  seed_pod_identity_default
+  local context_dir="$OUTPUT_SUB_PATH/docker/substituted"
+
+  # Strip the managed-by tag from the managed entry.
+  yq -i 'del((.iam.podIdentityAssociations[] | select(.tags."kaptain.org/association-key" == "karpenter-aws")).tags."kaptain.org/managed-by")' "$context_dir/cluster.yaml"
+
+  run "$SCRIPTS_DIR/aws-eks-cluster-management-post-build-validate"
+  [ "$status" -ne 0 ]
+  assert_output_contains "missing or wrong kaptain.org/managed-by tag"
+}
+
+@test "post-build: pod-identity permissionPolicy regression fails" {
+  seed_pod_identity_default
+  local context_dir="$OUTPUT_SUB_PATH/docker/substituted"
+
+  # Synthetic regression: someone re-introduces permissionPolicy in emitted yaml.
+  yq -i '(.iam.podIdentityAssociations[] | select(.tags."kaptain.org/association-key" == "karpenter-aws")).permissionPolicy = {"Version": "2012-10-17", "Statement": []}' "$context_dir/cluster.yaml"
+
+  run "$SCRIPTS_DIR/aws-eks-cluster-management-post-build-validate"
+  [ "$status" -ne 0 ]
+  assert_output_contains "has 'permissionPolicy'"
+}
+
+@test "post-build: pod-identity declared in canonical state but missing from yaml fails" {
+  seed_pod_identity_default
+  local context_dir="$OUTPUT_SUB_PATH/docker/substituted"
+
+  # Remove the karpenter-aws association so canonical state expects it but yaml lacks it.
+  yq -i 'del(.iam.podIdentityAssociations[] | select(.tags."kaptain.org/association-key" == "karpenter-aws"))' "$context_dir/cluster.yaml"
+
+  run "$SCRIPTS_DIR/aws-eks-cluster-management-post-build-validate"
+  [ "$status" -ne 0 ]
+  assert_output_contains "pod-identity 'karpenter-aws' missing from substituted cluster.yaml"
 }

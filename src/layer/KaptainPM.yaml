@@ -1,15 +1,13 @@
-apiVersion: kaptain.org/1.16
+apiVersion: kaptain.org/1.19
 kind: basic-quality-and-versioning
 metadata:
   description: "AWS EKS cluster management build flow as a postVersionsAndNaming hook"
-
 spec:
   main:
     hooks:
       postVersionsAndNaming: kaptain-out/aws-eks-cluster-management-orchestrator.bash
     docker:
       platform: linux/amd64,linux/arm64
-
 layer-payload:
   - source: /aws-eks-cluster-management-orchestrator.bash
     destination: kaptain-out

@@ -55,6 +55,11 @@
 #     Suffix must be lowercase alphanumeric with optional hyphens (no leading/trailing/consecutive hyphens)
 #   ADDONS_<NAME>_SERVICE_ACCOUNT_ROLE_ARN - Per-addon service account role ARN
 #     (e.g., ADDONS_VPC_CNI_SERVICE_ACCOUNT_ROLE_ARN to AddonsVpcCniServiceAccountRoleArn)
+#   POD_IDENTITY_ASSOCIATIONS              - Pod-identity association keys, comma-separated (e.g., karpenter-aws,external-dns)
+#     Each key requires a POD_IDENTITY_ASSOCIATION_<KEY> fragment file (yaml: namespace/serviceAccountName/roleName, OR namespace/serviceAccountName/roleARN)
+#     Managed mode: roleName + matching src/iam/<key>.json policy doc; layer creates the IAM role
+#     Existing-role mode: roleARN only (no roleName, no JSON); operator-supplied role used as-is
+#     Keys must be kebab-case ([a-z0-9] with optional non-consecutive hyphens), unique across the enumeration
 #
 # Tokens with defaults (checked in CONFIG_SUB_PATH, default written to platform config dir if absent and needed):
 #   KUBERNETES_MAJOR_VERSION                   - default: 1
@@ -81,6 +86,7 @@
 #   EKS_PUBLIC_NETWORKING      - Include public subnets section (default: false)
 #   EKS_CILIUM_EBPF_NETWORKING - Generate controlplane-only yaml (default: false)
 #   SECRETS_SUB_PATH           - Source dir for encrypted secrets (default: src/secrets)
+#   IAM_POLICIES_SUB_PATH      - Source dir for pod-identity permission policy JSONs, one <association-key>.json per managed-mode association (default: src/iam)
 #   DOCKER_PLATFORM            - Target platform(s) (default: linux/amd64)
 #   TOKEN_DELIMITER_STYLE      - Token delimiter syntax (default: shell)
 #   TOKEN_NAME_STYLE           - Case style for token names (default: PascalCase)
@@ -708,6 +714,191 @@ if has_config_file "METADATA_ANNOTATIONS"; then
   fi
 fi
 
+# === Pod identity associations ===
+
+declare -a pi_keys=()
+pi_count=0
+if has_config_file "POD_IDENTITY_ASSOCIATIONS"; then
+  pi_raw=$(< "${CONFIG_SUB_PATH}/${checked_name}")
+  pi_raw="${pi_raw%$'\n'}"
+  IFS=',' read -ra pi_keys_dirty <<< "${pi_raw}"
+  for key in "${pi_keys_dirty[@]}"; do
+    key="${key#"${key%%[![:space:]]*}"}"
+    key="${key%"${key##*[![:space:]]}"}"
+    [[ -z "${key}" ]] && continue
+    pi_keys+=("${key}")
+  done
+  pi_count=${#pi_keys[@]}
+
+  if [[ ${pi_count} -eq 0 ]]; then
+    log_error "PodIdentityAssociations: file is present but parses to zero keys — omit the file entirely if you mean 'no associations'"
+    validation_errors=$((validation_errors + 1))
+  fi
+
+  for key in "${pi_keys[@]}"; do
+    if [[ ! "${key}" =~ ^[a-z0-9](-?[a-z0-9])*$ ]]; then
+      log_error "PodIdentityAssociations: key '${key}' must be lowercase alphanumeric with optional hyphens"
+      validation_errors=$((validation_errors + 1))
+    fi
+  done
+
+  if [[ ${pi_count} -gt 1 ]]; then
+    pi_unique=$(printf '%s\n' "${pi_keys[@]}" | sort -u | wc -l | tr -d ' ')
+    if [[ "${pi_unique}" -ne "${pi_count}" ]]; then
+      log_error "PodIdentityAssociations: duplicate keys found"
+      validation_errors=$((validation_errors + 1))
+    fi
+  fi
+fi
+
+declare -a pi_fragment_files=()
+declare -a pi_namespaces=()
+declare -a pi_sa_names=()
+declare -a pi_role_arns=()
+declare -a pi_role_names=()
+
+for i in "${!pi_keys[@]}"; do
+  key="${pi_keys[${i}]}"
+  key_upper=$(echo "${key}" | tr '[:lower:]-' '[:upper:]_')
+  canonical="POD_IDENTITY_ASSOCIATION_${key_upper}"
+  key_label=$(convert_token_name "PascalCase" "${canonical}")
+
+  if ! has_config_file "${canonical}"; then
+    log_error "PodIdentityAssociations: key '${key}' declared but fragment file '$(convert_token_name "${TOKEN_NAME_STYLE}" "${canonical}")' is missing"
+    validation_errors=$((validation_errors + 1))
+    pi_fragment_files+=("")
+    pi_namespaces+=("")
+    pi_sa_names+=("")
+    pi_role_arns+=("")
+    pi_role_names+=("")
+    continue
+  fi
+
+  fragment_file="${CONFIG_SUB_PATH}/${checked_name}"
+  pi_fragment_files+=("${fragment_file}")
+
+  if ! yq -e '.' "${fragment_file}" &>/dev/null; then
+    log_error "${key_label}: file is not valid YAML"
+    validation_errors=$((validation_errors + 1))
+    pi_namespaces+=("")
+    pi_sa_names+=("")
+    pi_role_arns+=("")
+    pi_role_names+=("")
+    continue
+  fi
+
+  unknown_keys=$(yq -r 'keys | .[]' "${fragment_file}" \
+    | grep -vE '^(namespace|serviceAccountName|roleName|roleARN)$' || true)
+  if [[ -n "${unknown_keys}" ]]; then
+    while IFS= read -r k; do
+      log_error "${key_label}: unrecognised key '${k}' (allowed: namespace, serviceAccountName, roleName, roleARN)"
+      validation_errors=$((validation_errors + 1))
+    done <<< "${unknown_keys}"
+  fi
+
+  ns=$(yq -r '.namespace // ""' "${fragment_file}")
+  sa=$(yq -r '.serviceAccountName // ""' "${fragment_file}")
+  rn=$(yq -r '.roleName // ""' "${fragment_file}")
+  ra=$(yq -r '.roleARN // ""' "${fragment_file}")
+
+  if [[ -z "${ns}" ]]; then
+    log_error "${key_label}: 'namespace' is required"
+    validation_errors=$((validation_errors + 1))
+  fi
+  if [[ -z "${sa}" ]]; then
+    log_error "${key_label}: 'serviceAccountName' is required"
+    validation_errors=$((validation_errors + 1))
+  fi
+  if [[ -n "${rn}" && -n "${ra}" ]]; then
+    log_error "${key_label}: at most one of roleName, roleARN may be set"
+    validation_errors=$((validation_errors + 1))
+  fi
+
+  if [[ -n "${rn}" ]]; then
+    if [[ ! "${rn}" =~ ^[A-Za-z0-9_+=,.@-]+$ ]]; then
+      log_error "${key_label}: explicit roleName '${rn}' contains characters not allowed by IAM ([A-Za-z0-9_+=,.@-])"
+      validation_errors=$((validation_errors + 1))
+    fi
+    if [[ ${#rn} -gt 64 ]]; then
+      log_error "${key_label}: explicit roleName '${rn}' exceeds 64 chars"
+      validation_errors=$((validation_errors + 1))
+    fi
+  fi
+
+  pi_namespaces+=("${ns}")
+  pi_sa_names+=("${sa}")
+  pi_role_arns+=("${ra}")
+  pi_role_names+=("${rn}")
+done
+
+# === IAM policy JSON validation ===
+
+if [[ -d "${IAM_POLICIES_SUB_PATH}" ]]; then
+  for f in "${IAM_POLICIES_SUB_PATH}"/*; do
+    [[ -e "${f}" ]] || continue
+    fname=$(basename "${f}")
+    if [[ "${fname}" != *.json ]]; then
+      log_error "${IAM_POLICIES_SUB_PATH}/${fname}: unrecognised file — only *.json policy documents are accepted"
+      validation_errors=$((validation_errors + 1))
+      continue
+    fi
+    fkey="${fname%.json}"
+    found=false
+    for k in "${pi_keys[@]}"; do
+      if [[ "${k}" == "${fkey}" ]]; then found=true; break; fi
+    done
+    if [[ "${found}" == "false" ]]; then
+      log_error "${IAM_POLICIES_SUB_PATH}/${fname}: not listed in PodIdentityAssociations"
+      validation_errors=$((validation_errors + 1))
+      continue
+    fi
+    if ! yq -p=json -o=json -e '.' "${f}" &>/dev/null; then
+      log_error "${IAM_POLICIES_SUB_PATH}/${fname}: not valid JSON"
+      validation_errors=$((validation_errors + 1))
+      continue
+    fi
+    version=$(yq -p=json -o=json -r '.Version // ""' "${f}")
+    if [[ -z "${version}" ]]; then
+      log_error "${IAM_POLICIES_SUB_PATH}/${fname}: missing 'Version'"
+      validation_errors=$((validation_errors + 1))
+    fi
+    stmt_kind=$(yq -p=json -o=json -r '.Statement | type' "${f}" 2>/dev/null || echo "")
+    case "${stmt_kind}" in
+      '!!seq')
+        stmt_len=$(yq -p=json -o=json -r '.Statement | length' "${f}")
+        if [[ "${stmt_len}" -eq 0 ]]; then
+          log_error "${IAM_POLICIES_SUB_PATH}/${fname}: 'Statement' is an empty array"
+          validation_errors=$((validation_errors + 1))
+        fi
+        ;;
+      '!!map')
+        :
+        ;;
+      *)
+        log_error "${IAM_POLICIES_SUB_PATH}/${fname}: 'Statement' must be an object or non-empty array"
+        validation_errors=$((validation_errors + 1))
+        ;;
+    esac
+  done
+fi
+
+for i in "${!pi_keys[@]}"; do
+  key="${pi_keys[${i}]}"
+  role_arn="${pi_role_arns[${i}]}"
+  json_file="${IAM_POLICIES_SUB_PATH}/${key}.json"
+  if [[ -z "${role_arn}" ]]; then
+    if [[ ! -f "${json_file}" ]]; then
+      log_error "PodIdentityAssociation '${key}': managed mode (no roleARN) requires ${json_file}"
+      validation_errors=$((validation_errors + 1))
+    fi
+  else
+    if [[ -f "${json_file}" ]]; then
+      log_error "PodIdentityAssociation '${key}': existing-role mode (roleARN set) must not have a policy JSON at ${json_file}"
+      validation_errors=$((validation_errors + 1))
+    fi
+  fi
+done
+
 if [[ ${validation_errors} -gt 0 ]]; then
   log_error "Validation failed with ${validation_errors} error(s)"
   exit 1
@@ -736,6 +927,23 @@ printf '%s' "${additional_ng_count}" > "${expected_values_dir}/additional-nodegr
 if [[ ${additional_ng_count} -gt 0 ]]; then
   printf '%s' "$(IFS=','; echo "${additional_ng_suffixes_upper[*]}")" > "${expected_values_dir}/additional-nodegroup-suffixes"
 fi
+
+# Pod identity canonical state for post-validate
+printf '%s' "${pi_count}" > "${expected_values_dir}/pod-identity-count"
+if [[ ${pi_count} -gt 0 ]]; then
+  printf '%s\n' "${pi_keys[@]}" > "${expected_values_dir}/pod-identity-keys"
+  : > "${expected_values_dir}/pod-identity-modes"
+  for i in "${!pi_keys[@]}"; do
+    if [[ -n "${pi_role_arns[${i}]}" ]]; then
+      echo "external" >> "${expected_values_dir}/pod-identity-modes"
+    else
+      echo "managed" >> "${expected_values_dir}/pod-identity-modes"
+    fi
+  done
+fi
+
+# shellcheck disable=SC2154 # AWS_ACCOUNT_ID set dynamically by resolve_token via eval
+printf '%s' "${AWS_ACCOUNT_ID}" > "${expected_values_dir}/aws-account-id"
 
 # === Determine platforms, context dirs, and config dirs ===
 
@@ -1416,6 +1624,40 @@ YAML
 
 iam:
   withOIDC: ${token_iam_with_oidc}
+YAML
+
+  # Pod identity associations — only in full cluster.yaml, not controlplane-only
+  if [[ "${include_nodegroups}" == "true" && ${pi_count} -gt 0 ]]; then
+    echo "  podIdentityAssociations:"
+    local i
+    for i in "${!pi_keys[@]}"; do
+      local pi_key="${pi_keys[${i}]}"
+      local pi_ns="${pi_namespaces[${i}]}"
+      local pi_sa="${pi_sa_names[${i}]}"
+      local pi_ra="${pi_role_arns[${i}]}"
+      local pi_rn="${pi_role_names[${i}]}"
+
+      local emit_arn
+      if [[ -n "${pi_ra}" ]]; then
+        emit_arn="${pi_ra}"
+      else
+        local role_name="${pi_rn}"
+        if [[ -z "${role_name}" ]]; then
+          role_name="${token_project_name}-${pi_ns}-${pi_sa}"
+        fi
+        emit_arn="arn:aws:iam::${token_aws_account_id}:role/${role_name}"
+      fi
+
+      echo "    - namespace: ${pi_ns}"
+      echo "      serviceAccountName: ${pi_sa}"
+      echo "      roleARN: ${emit_arn}"
+      echo "      tags:"
+      echo "        kaptain.org/managed-by: ${token_project_name}"
+      echo "        kaptain.org/association-key: ${pi_key}"
+    done
+  fi
+
+  cat <<YAML
 
 vpc:
   id: ${token_vpc_id}
@@ -1552,6 +1794,10 @@ generate_dockerfile() {
     echo "COPY cluster-controlplane-only.yaml /kd/eks/"
   fi
 
+  if [[ -d "${context_dir}/iam" ]]; then
+    echo "COPY iam/ /kd/iam/"
+  fi
+
   if [[ -f "${context_dir}/aws-credentials.age" ]]; then
     echo "COPY aws-credentials.age /kd/secrets/"
   fi
@@ -1646,6 +1892,17 @@ main() {
       resolve_file "aws-credentials.age" "${context_dir}" "${SECRETS_SUB_PATH}" || true
     fi
 
+    # Copy ${IAM_POLICIES_SUB_PATH}/ JSONs into context dir as iam/
+    if [[ -d "${IAM_POLICIES_SUB_PATH}" ]]; then
+      mkdir -p "${context_dir}/iam"
+      local pi_json
+      for pi_json in "${IAM_POLICIES_SUB_PATH}"/*.json; do
+        [[ -e "${pi_json}" ]] || continue
+        cp "${pi_json}" "${context_dir}/iam/$(basename "${pi_json}")"
+        log "  iam/$(basename "${pi_json}"): copied from ${IAM_POLICIES_SUB_PATH}/"
+      done
+    fi
+
     # Generate Dockerfile
     if [[ ! -f "${context_dir}/Dockerfile" ]]; then
       log "  Dockerfile: generating"
@@ -1670,6 +1927,19 @@ main() {
   sub_files="${sub_files},cluster.yaml"
   if [[ "${need_controlplane_only}" == "true" ]]; then
     sub_files="${sub_files},cluster-controlplane-only.yaml"
+  fi
+
+  # IAM policy JSONs must also undergo token substitution
+  if [[ ${pi_count} -gt 0 ]]; then
+    local i
+    for i in "${!pi_keys[@]}"; do
+      local pi_key="${pi_keys[${i}]}"
+      local pi_ra="${pi_role_arns[${i}]}"
+      # Only managed-mode keys have a JSON; existing-role mode has none
+      if [[ -z "${pi_ra}" ]]; then
+        sub_files="${sub_files},iam/${pi_key}.json"
+      fi
+    done
   fi
 
   output_var "DOCKERFILE_SUBSTITUTION_FILES" "${sub_files}"

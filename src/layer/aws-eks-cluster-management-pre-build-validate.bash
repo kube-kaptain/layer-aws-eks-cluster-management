@@ -530,6 +530,29 @@ validate_cluster_yaml_tokens() {
   done
 }
 
+# validate_pod_identity_agent_addon - Require eks-pod-identity-agent in addons when
+# the yaml declares any pod identity associations. The build never auto-injects;
+# operators must opt in to the agent themselves.
+validate_pod_identity_agent_addon() {
+  local yaml_file="$1"
+
+  if [[ ! -f "${yaml_file}" ]]; then
+    return
+  fi
+
+  local has_pi
+  has_pi=$(yq '(.iam.podIdentityAssociations // []) | length' "${yaml_file}" 2>/dev/null || echo "0")
+  if [[ "${has_pi}" -le 0 ]]; then
+    return
+  fi
+
+  local has_addon
+  has_addon=$(yq '[(.addons // [])[]?.name] | contains(["eks-pod-identity-agent"])' "${yaml_file}" 2>/dev/null || echo "false")
+  if [[ "${has_addon}" != "true" ]]; then
+    fail "${yaml_file}: declares pod identity associations but the addons list does not include 'eks-pod-identity-agent'. Add it to EKS_ADDONS_LIST or to the addons block in your hand-placed cluster.yaml."
+  fi
+}
+
 # === Main ===
 
 main() {
@@ -564,9 +587,12 @@ main() {
     log "--- Validating ${context_dir} ---"
 
     validate_cluster_yaml_tokens "${context_dir}/cluster.yaml"
+    validate_pod_identity_agent_addon "${context_dir}/cluster.yaml"
 
     if [[ -f "${context_dir}/cluster-controlplane-only.yaml" ]]; then
       validate_cluster_yaml_tokens "${context_dir}/cluster-controlplane-only.yaml"
+      # pod-identity-agent check intentionally skipped for controlplane-only:
+      # no nodes -> no agent -> no associations, by design.
     fi
   done
 

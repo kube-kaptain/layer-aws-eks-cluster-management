@@ -12,7 +12,13 @@ PROJECT_ROOT="${PROJECT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd
 
 export BUILD_PLATFORM="${BUILD_PLATFORM:-test}"
 
+# OUTPUT_SUB_PATH must be a relative path under PROJECT_ROOT. Defensively reset
+# if the outer env (e.g. a polluted interactive shell) has set it absolute,
+# otherwise SCRIPTS_STAGE_DIR below ends up doubled (PROJECT_ROOT/PROJECT_ROOT/...).
 OUTPUT_SUB_PATH="${OUTPUT_SUB_PATH:-kaptain-out}"
+case "${OUTPUT_SUB_PATH}" in
+  /*) OUTPUT_SUB_PATH="kaptain-out" ;;
+esac
 TEST_TARGET_DIR="${PROJECT_ROOT}/${OUTPUT_SUB_PATH}/test"
 SCRIPTS_STAGE_DIR="${PROJECT_ROOT}/${OUTPUT_SUB_PATH}/test-fixtures"
 SCRIPTS_DIR="${SCRIPTS_STAGE_DIR}/main"
@@ -42,6 +48,32 @@ _stage_layer_scripts
 
 source "${SCRIPTS_STAGE_DIR}/defaults/platform.bash"
 source "${SCRIPTS_STAGE_DIR}/lib/log.bash"
+
+# create_test_sandbox - Per-test relative sandbox under OUTPUT_SUB_PATH.
+#
+# Returns a RELATIVE path of the form
+#   kaptain-out/tests/bats/<batsfile-basename>/<bats-test-name>[/<suffix>]
+# rm -rf + mkdir -p the absolute equivalent, then cd to PROJECT_ROOT so the
+# returned relative path resolves consistently when the script-under-test reads
+# it as ${OUTPUT_SUB_PATH}/<...>.
+#
+# Args:
+#   $1 - optional suffix appended to the relative subpath (e.g. "target", "base")
+create_test_sandbox() {
+  local suffix="${1:-}"
+  local batsfile_base
+  batsfile_base=$(basename "${BATS_TEST_FILENAME:-unknown}" .bats)
+  local test_name="${BATS_TEST_NAME:-shared}"
+  local sandbox_rel="kaptain-out/tests/bats/${batsfile_base}/${test_name}"
+  if [[ -n "${suffix}" ]]; then
+    sandbox_rel="${sandbox_rel}/${suffix}"
+  fi
+  local sandbox_abs="${PROJECT_ROOT}/${sandbox_rel}"
+  rm -rf "${sandbox_abs}"
+  mkdir -p "${sandbox_abs}"
+  cd "${PROJECT_ROOT}" || return 1
+  echo "${sandbox_rel}"
+}
 
 create_test_dir() {
   local prefix="${1:-test}"
