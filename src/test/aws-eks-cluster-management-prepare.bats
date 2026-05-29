@@ -12,17 +12,24 @@ load helpers
 
 setup_dataset_dir() {
   local name="$1"
-  local base_dir
-  base_dir="${DATASET_CACHE_DIR}/${name}"
+  # OUTPUT_SUB_PATH stays relative to PROJECT_ROOT so the script-under-test never
+  # sees an absolute value (which would cause helpers.bash SCRIPTS_STAGE_DIR
+  # doubling when the outer env already has OUTPUT_SUB_PATH set absolute).
+  local batsfile_base
+  batsfile_base=$(basename "${BATS_TEST_FILENAME:-unknown}" .bats)
+  local sandbox_rel="kaptain-out/tests/bats/${batsfile_base}/datasets/${name}/target"
+  local base_dir="${PROJECT_ROOT}/kaptain-out/tests/bats/${batsfile_base}/datasets/${name}"
   rm -rf "$base_dir"
   mkdir -p "$base_dir"
+  cd "$PROJECT_ROOT" || return 1
 
   export TEST_BASE_DIR="$base_dir"
   export GITHUB_OUTPUT="$base_dir/github-output"
-  export OUTPUT_SUB_PATH="$base_dir/target"
+  export OUTPUT_SUB_PATH="$sandbox_rel"
   export CONFIG_SUB_PATH="$base_dir/src/config"
   export EKS_CLUSTER_YAML_SUB_PATH="$base_dir/src/eks"
   export SECRETS_SUB_PATH="$base_dir/src/secrets"
+  export IAM_POLICIES_SUB_PATH="$base_dir/src/iam"
 
   mkdir -p "$CONFIG_SUB_PATH"
   printf 'eu-west-1' > "$CONFIG_SUB_PATH/AwsRegion"
@@ -231,16 +238,16 @@ use_dataset() {
 
 setup() {
   # For failure/special tests that need fresh dirs
-  local base_dir
-  base_dir=$(create_test_dir "eks-prepare")
-  rm -rf "$base_dir"
-  mkdir -p "$base_dir"
+  local sandbox_rel
+  sandbox_rel=$(create_test_sandbox "target")
+  local base_dir="${PROJECT_ROOT}/${sandbox_rel%/target}"
   export TEST_BASE_DIR="$base_dir"
   export GITHUB_OUTPUT="$base_dir/github-output"
-  export OUTPUT_SUB_PATH="$base_dir/target"
+  export OUTPUT_SUB_PATH="$sandbox_rel"
   export CONFIG_SUB_PATH="$base_dir/src/config"
   export EKS_CLUSTER_YAML_SUB_PATH="$base_dir/src/eks"
   export SECRETS_SUB_PATH="$base_dir/src/secrets"
+  export IAM_POLICIES_SUB_PATH="$base_dir/src/iam"
 
   mkdir -p "$CONFIG_SUB_PATH"
   printf 'eu-west-1' > "$CONFIG_SUB_PATH/AwsRegion"
@@ -2562,4 +2569,221 @@ YAML
   assert_output_contains "NodeGrupTypo"
   assert_output_contains "AdditionalNodeGroups"
   assert_output_contains "2 unrecognised config file(s)"
+}
+
+# === Pod identity associations ===
+
+@test "fails when PodIdentityAssociations file is empty" {
+  printf '' > "$CONFIG_SUB_PATH/PodIdentityAssociations"
+
+  run "$SCRIPTS_DIR/aws-eks-cluster-management-prepare"
+  [ "$status" -ne 0 ]
+  assert_output_contains "parses to zero keys"
+}
+
+@test "fails when PodIdentityAssociations key has no fragment" {
+  printf 'karpenter-aws' > "$CONFIG_SUB_PATH/PodIdentityAssociations"
+
+  run "$SCRIPTS_DIR/aws-eks-cluster-management-prepare"
+  [ "$status" -ne 0 ]
+  assert_output_contains "PodIdentityAssociationKarpenterAws"
+  assert_output_contains "is missing"
+}
+
+@test "fails when fragment sets both roleName and roleARN" {
+  printf 'karpenter-aws' > "$CONFIG_SUB_PATH/PodIdentityAssociations"
+  cat > "$CONFIG_SUB_PATH/PodIdentityAssociationKarpenterAws" <<'YAML'
+namespace: kube-system
+serviceAccountName: karpenter
+roleName: KarpenterAwsRole
+roleARN: arn:aws:iam::123456789012:role/KarpenterAwsRole
+YAML
+
+  run "$SCRIPTS_DIR/aws-eks-cluster-management-prepare"
+  [ "$status" -ne 0 ]
+  assert_output_contains "at most one of roleName, roleARN"
+}
+
+@test "fails when fragment has unrecognised key" {
+  printf 'karpenter-aws' > "$CONFIG_SUB_PATH/PodIdentityAssociations"
+  cat > "$CONFIG_SUB_PATH/PodIdentityAssociationKarpenterAws" <<'YAML'
+namespace: kube-system
+serviceAccountName: karpenter
+roleName: KarpenterAwsRole
+unknownKey: oops
+YAML
+  mkdir -p "$IAM_POLICIES_SUB_PATH"
+  cat > "$IAM_POLICIES_SUB_PATH/karpenter-aws.json" <<'JSON'
+{"Version": "2012-10-17", "Statement": {"Effect": "Allow", "Action": "*", "Resource": "*"}}
+JSON
+
+  run "$SCRIPTS_DIR/aws-eks-cluster-management-prepare"
+  [ "$status" -ne 0 ]
+  assert_output_contains "unrecognised key 'unknownKey'"
+}
+
+@test "fails when managed mode lacks src/iam/<key>.json" {
+  printf 'karpenter-aws' > "$CONFIG_SUB_PATH/PodIdentityAssociations"
+  cat > "$CONFIG_SUB_PATH/PodIdentityAssociationKarpenterAws" <<'YAML'
+namespace: kube-system
+serviceAccountName: karpenter
+YAML
+
+  run "$SCRIPTS_DIR/aws-eks-cluster-management-prepare"
+  [ "$status" -ne 0 ]
+  assert_output_contains "managed mode (no roleARN) requires"
+}
+
+@test "fails when existing-role mode supplies src/iam/<key>.json" {
+  printf 'external-dns' > "$CONFIG_SUB_PATH/PodIdentityAssociations"
+  cat > "$CONFIG_SUB_PATH/PodIdentityAssociationExternalDns" <<'YAML'
+namespace: external-dns
+serviceAccountName: external-dns
+roleARN: arn:aws:iam::123456789012:role/ExternalDnsRole
+YAML
+  mkdir -p "$IAM_POLICIES_SUB_PATH"
+  cat > "$IAM_POLICIES_SUB_PATH/external-dns.json" <<'JSON'
+{"Version": "2012-10-17", "Statement": {"Effect": "Allow", "Action": "*", "Resource": "*"}}
+JSON
+
+  run "$SCRIPTS_DIR/aws-eks-cluster-management-prepare"
+  [ "$status" -ne 0 ]
+  assert_output_contains "existing-role mode (roleARN set) must not have a policy JSON"
+}
+
+@test "fails when src/iam contains stray non-json file" {
+  printf 'karpenter-aws' > "$CONFIG_SUB_PATH/PodIdentityAssociations"
+  cat > "$CONFIG_SUB_PATH/PodIdentityAssociationKarpenterAws" <<'YAML'
+namespace: kube-system
+serviceAccountName: karpenter
+YAML
+  mkdir -p "$IAM_POLICIES_SUB_PATH"
+  cat > "$IAM_POLICIES_SUB_PATH/karpenter-aws.json" <<'JSON'
+{"Version": "2012-10-17", "Statement": {"Effect": "Allow", "Action": "*", "Resource": "*"}}
+JSON
+  printf 'docs' > "$IAM_POLICIES_SUB_PATH/README.md"
+
+  run "$SCRIPTS_DIR/aws-eks-cluster-management-prepare"
+  [ "$status" -ne 0 ]
+  assert_output_contains "unrecognised file — only *.json policy documents are accepted"
+}
+
+@test "accepts one managed + one existing-role association" {
+  printf 'karpenter-aws,external-dns' > "$CONFIG_SUB_PATH/PodIdentityAssociations"
+  cat > "$CONFIG_SUB_PATH/PodIdentityAssociationKarpenterAws" <<'YAML'
+namespace: kube-system
+serviceAccountName: karpenter
+YAML
+  cat > "$CONFIG_SUB_PATH/PodIdentityAssociationExternalDns" <<'YAML'
+namespace: external-dns
+serviceAccountName: external-dns
+roleARN: arn:aws:iam::123456789012:role/ExternalDnsRole
+YAML
+  mkdir -p "$IAM_POLICIES_SUB_PATH"
+  cat > "$IAM_POLICIES_SUB_PATH/karpenter-aws.json" <<'JSON'
+{"Version": "2012-10-17", "Statement": {"Effect": "Allow", "Action": "*", "Resource": "*"}}
+JSON
+
+  run "$SCRIPTS_DIR/aws-eks-cluster-management-prepare"
+  [ "$status" -eq 0 ]
+
+  local ev_dir="$OUTPUT_SUB_PATH/aws-eks-cluster-management/expected-values"
+  [ "$(< "$ev_dir/pod-identity-count")" = "2" ]
+  [ "$(sed -n '1p' "$ev_dir/pod-identity-keys")" = "karpenter-aws" ]
+  [ "$(sed -n '2p' "$ev_dir/pod-identity-keys")" = "external-dns" ]
+  [ "$(sed -n '1p' "$ev_dir/pod-identity-modes")" = "managed" ]
+  [ "$(sed -n '2p' "$ev_dir/pod-identity-modes")" = "external" ]
+  [ "$(< "$ev_dir/aws-account-id")" = "123456789012" ]
+}
+
+@test "emits podIdentityAssociations in cluster.yaml" {
+  printf 'karpenter-aws,external-dns' > "$CONFIG_SUB_PATH/PodIdentityAssociations"
+  cat > "$CONFIG_SUB_PATH/PodIdentityAssociationKarpenterAws" <<'YAML'
+namespace: kube-system
+serviceAccountName: karpenter
+YAML
+  cat > "$CONFIG_SUB_PATH/PodIdentityAssociationExternalDns" <<'YAML'
+namespace: external-dns
+serviceAccountName: external-dns
+roleARN: arn:aws:iam::123456789012:role/ExternalDnsRole
+YAML
+  mkdir -p "$IAM_POLICIES_SUB_PATH"
+  cat > "$IAM_POLICIES_SUB_PATH/karpenter-aws.json" <<'JSON'
+{"Version": "2012-10-17", "Statement": {"Effect": "Allow", "Action": "*", "Resource": "*"}}
+JSON
+
+  run "$SCRIPTS_DIR/aws-eks-cluster-management-prepare"
+  [ "$status" -eq 0 ]
+
+  local yaml_file="$OUTPUT_SUB_PATH/docker/substituted/cluster.yaml"
+  [ -f "$yaml_file" ]
+
+  yq -e '.iam.podIdentityAssociations | length == 2' "$yaml_file" >/dev/null
+
+  [ "$(yq '.iam.podIdentityAssociations[0].namespace' "$yaml_file")" = "kube-system" ]
+  [ "$(yq '.iam.podIdentityAssociations[0].serviceAccountName' "$yaml_file")" = "karpenter" ]
+  [ "$(yq '.iam.podIdentityAssociations[0].roleARN' "$yaml_file")" = 'arn:aws:iam::${AwsAccountId}:role/${ProjectName}-kube-system-karpenter' ]
+  [ "$(yq '.iam.podIdentityAssociations[0].tags["kaptain.org/association-key"]' "$yaml_file")" = "karpenter-aws" ]
+
+  [ "$(yq '.iam.podIdentityAssociations[1].namespace' "$yaml_file")" = "external-dns" ]
+  [ "$(yq '.iam.podIdentityAssociations[1].roleARN' "$yaml_file")" = "arn:aws:iam::123456789012:role/ExternalDnsRole" ]
+  [ "$(yq '.iam.podIdentityAssociations[1].tags["kaptain.org/association-key"]' "$yaml_file")" = "external-dns" ]
+
+  local dockerfile="$OUTPUT_SUB_PATH/docker/substituted/Dockerfile"
+  assert_contains "$(< "$dockerfile")" "COPY iam/ /kd/iam/" "Dockerfile"
+
+  [ -f "$OUTPUT_SUB_PATH/docker/substituted/iam/karpenter-aws.json" ]
+  [ ! -f "$OUTPUT_SUB_PATH/docker/substituted/iam/external-dns.json" ]
+}
+
+@test "controlplane-only yaml excludes podIdentityAssociations" {
+  export EKS_CILIUM_EBPF_NETWORKING="true"
+  printf 'karpenter-aws' > "$CONFIG_SUB_PATH/PodIdentityAssociations"
+  cat > "$CONFIG_SUB_PATH/PodIdentityAssociationKarpenterAws" <<'YAML'
+namespace: kube-system
+serviceAccountName: karpenter
+YAML
+  mkdir -p "$IAM_POLICIES_SUB_PATH"
+  cat > "$IAM_POLICIES_SUB_PATH/karpenter-aws.json" <<'JSON'
+{"Version": "2012-10-17", "Statement": {"Effect": "Allow", "Action": "*", "Resource": "*"}}
+JSON
+
+  run "$SCRIPTS_DIR/aws-eks-cluster-management-prepare"
+  [ "$status" -eq 0 ]
+
+  local cp_yaml="$OUTPUT_SUB_PATH/docker/substituted/cluster-controlplane-only.yaml"
+  [ -f "$cp_yaml" ]
+  yq -e '(.iam.podIdentityAssociations // []) | length == 0' "$cp_yaml" >/dev/null
+  # Controlplane-only has no nodes, so the agent (a DaemonSet) cannot run there.
+  # Default EKS_ADDONS_LIST omits eks-pod-identity-agent; guard against any
+  # future change that would auto-inject it into the controlplane-only variant.
+  yq -e '[(.addons // [])[].name] | contains(["eks-pod-identity-agent"]) | not' "$cp_yaml" >/dev/null
+
+  local full_yaml="$OUTPUT_SUB_PATH/docker/substituted/cluster.yaml"
+  yq -e '.iam.podIdentityAssociations | length == 1' "$full_yaml" >/dev/null
+}
+
+@test "Dockerfile omits COPY iam/ when no pod-identity declared" {
+  run "$SCRIPTS_DIR/aws-eks-cluster-management-prepare"
+  [ "$status" -eq 0 ]
+
+  local dockerfile="$OUTPUT_SUB_PATH/docker/substituted/Dockerfile"
+  local content
+  content=$(< "$dockerfile")
+  if [[ "$content" == *"COPY iam/"* ]]; then
+    echo "Expected Dockerfile to NOT contain 'COPY iam/' when no pod-identity declared"
+    echo "Dockerfile content: $content"
+    return 1
+  fi
+}
+
+@test "stray PodIdentityAssociationsTypo file is flagged by unrecognised-config sweep" {
+  # Defensive guard for Task 7: any future refactor that bypasses has_config_file
+  # would silently allow typos like 'PodIdentityAssociationsTypo' through.
+  printf 'karpenter-aws' > "$CONFIG_SUB_PATH/PodIdentityAssociationsTypo"
+
+  run "$SCRIPTS_DIR/aws-eks-cluster-management-prepare"
+  [ "$status" -ne 0 ]
+  assert_output_contains "Unrecognised config file"
+  assert_output_contains "PodIdentityAssociationsTypo"
 }

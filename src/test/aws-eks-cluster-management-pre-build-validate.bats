@@ -10,14 +10,12 @@ setup() {
     skip "yq not installed"
   fi
 
-  local base_dir
-  base_dir=$(create_test_dir "eks-pre-validate")
-  # Clean stale artifacts from previous runs (create_test_dir reuses paths)
-  rm -rf "$base_dir"
-  mkdir -p "$base_dir"
+  local sandbox_rel
+  sandbox_rel=$(create_test_sandbox "target")
+  local base_dir="${PROJECT_ROOT}/${sandbox_rel%/target}"
   export TEST_BASE_DIR="$base_dir"
   export GITHUB_OUTPUT="$base_dir/github-output"
-  export OUTPUT_SUB_PATH="$base_dir/target"
+  export OUTPUT_SUB_PATH="$sandbox_rel"
   export CONFIG_SUB_PATH="$base_dir/src/config"
 
   # Create minimal required config files
@@ -902,4 +900,34 @@ YAML
 
   run "$SCRIPTS_DIR/aws-eks-cluster-management-pre-build-validate"
   [ "$status" -eq 0 ]
+}
+
+# === Pod identity agent addon presence ===
+
+@test "passes when pod-identity declared and eks-pod-identity-agent addon present" {
+  local context_dir="$OUTPUT_SUB_PATH/docker/substituted"
+  yq -i '.iam.podIdentityAssociations = [{"namespace": "kube-system", "serviceAccountName": "karpenter", "roleARN": "arn:aws:iam::123456789012:role/r"}]' "$context_dir/cluster.yaml"
+  yq -i '.addons += [{"name": "eks-pod-identity-agent", "version": "latest"}]' "$context_dir/cluster.yaml"
+
+  run "$SCRIPTS_DIR/aws-eks-cluster-management-pre-build-validate"
+  [ "$status" -eq 0 ]
+}
+
+@test "fails when pod-identity declared but eks-pod-identity-agent addon missing" {
+  local context_dir="$OUTPUT_SUB_PATH/docker/substituted"
+  yq -i '.iam.podIdentityAssociations = [{"namespace": "kube-system", "serviceAccountName": "karpenter", "roleARN": "arn:aws:iam::123456789012:role/r"}]' "$context_dir/cluster.yaml"
+
+  run "$SCRIPTS_DIR/aws-eks-cluster-management-pre-build-validate"
+  [ "$status" -ne 0 ]
+  assert_output_contains "does not include 'eks-pod-identity-agent'"
+}
+
+@test "skips pod-identity-agent check when no pod-identity declared" {
+  run "$SCRIPTS_DIR/aws-eks-cluster-management-pre-build-validate"
+  [ "$status" -eq 0 ]
+  # No mention of the agent message since the check short-circuits
+  if [[ "$output" == *"eks-pod-identity-agent"* ]]; then
+    echo "Unexpected mention of eks-pod-identity-agent in output: $output"
+    return 1
+  fi
 }

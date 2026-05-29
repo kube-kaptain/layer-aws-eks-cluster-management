@@ -108,6 +108,25 @@ fi
 
 expected_total_nodegroup_count=$((1 + additional_ng_count))
 
+# Pod-identity canonical state (written by prepare; absent => zero associations)
+pi_count=0
+declare -a pi_keys=()
+declare -a pi_modes=()    # "managed" or "external"
+aws_account_id_for_check=""
+
+if [[ -f "${expected_values_dir}/pod-identity-count" ]]; then
+  pi_count=$(< "${expected_values_dir}/pod-identity-count")
+fi
+if [[ ${pi_count} -gt 0 && -f "${expected_values_dir}/pod-identity-keys" ]]; then
+  while IFS= read -r k; do pi_keys+=("${k}"); done < "${expected_values_dir}/pod-identity-keys"
+fi
+if [[ -f "${expected_values_dir}/pod-identity-modes" ]]; then
+  while IFS= read -r m; do pi_modes+=("${m}"); done < "${expected_values_dir}/pod-identity-modes"
+fi
+if [[ -f "${expected_values_dir}/aws-account-id" ]]; then
+  aws_account_id_for_check=$(< "${expected_values_dir}/aws-account-id")
+fi
+
 # === Determine context dirs and image URIs ===
 
 declare -a context_dirs=()
@@ -658,6 +677,84 @@ validate_image_integrity() {
   done
 }
 
+# Validate substituted pod-identity associations.
+# Runs after token substitution; verifies every association declared in prepare
+# (via canonical state) appears in the emitted yaml with a sane ARN, ownership
+# tags, and no legacy fields (permissionPolicy / roleName) leaking through.
+validate_pod_identity_associations() {
+  local yaml_file="$1"
+
+  if [[ ${pi_count} -le 0 ]]; then
+    return
+  fi
+
+  if [[ ! -f "${yaml_file}" ]]; then
+    fail "${yaml_file}: file not found for pod-identity validation"
+    return
+  fi
+
+  log ""
+  log "  --- Pod identity associations (${pi_count}) ---"
+
+  local i pi_key pi_mode assoc arn role_name pi_key_label arn_account managed_by has_pp has_rn
+  for i in "${!pi_keys[@]}"; do
+    pi_key="${pi_keys[${i}]}"
+    pi_mode="${pi_modes[${i}]:-managed}"
+
+    assoc=$(yq -o=json \
+      ".iam.podIdentityAssociations[] | select(.tags.\"kaptain.org/association-key\" == \"${pi_key}\")" \
+      "${yaml_file}" 2>/dev/null || true)
+
+    if [[ -z "${assoc}" || "${assoc}" == "null" ]]; then
+      fail "${yaml_file}: pod-identity '${pi_key}' missing from substituted cluster.yaml"
+      continue
+    fi
+
+    arn=$(echo "${assoc}" | yq -p=json -o=json -r '.roleARN')
+
+    # Check 1: ARN format. IAM allows role paths (arn:aws:iam::ACCT:role/some/path/Name);
+    # accept one or more `/`-delimited path components after `role/`.
+    if [[ ! "${arn}" =~ ^arn:aws:iam::[0-9]{12}:role(/[A-Za-z0-9_+=,.@-]+)+$ ]]; then
+      fail "${yaml_file}: pod-identity '${pi_key}' roleARN '${arn}' does not match IAM role ARN format"
+      continue
+    fi
+
+    # Check 2: role-name component length + chars (basename only - paths don't count toward 64).
+    role_name="${arn##*/}"
+    pi_key_label=$(convert_token_name "PascalCase" "POD_IDENTITY_ASSOCIATION_$(echo "${pi_key}" | tr '[:lower:]-' '[:upper:]_')")
+    if [[ ${#role_name} -gt 64 ]]; then
+      fail "${yaml_file}: pod-identity '${pi_key}' role name '${role_name}' is ${#role_name} chars, exceeds limit 64. Set roleName: explicitly in ${pi_key_label} to override."
+    fi
+
+    # Check 3: managed-mode account match (cross-account allowed only via existing-role mode).
+    if [[ "${pi_mode}" == "managed" && -n "${aws_account_id_for_check}" ]]; then
+      arn_account="${arn#arn:aws:iam::}"
+      arn_account="${arn_account%%:*}"
+      if [[ "${arn_account}" != "${aws_account_id_for_check}" ]]; then
+        fail "${yaml_file}: pod-identity '${pi_key}' managed-mode ARN points at account '${arn_account}', expected '${aws_account_id_for_check}'. Cross-account is only allowed via roleARN: existing-role mode."
+      fi
+    fi
+
+    # Check 4: ownership tag present and matches project name.
+    managed_by=$(echo "${assoc}" | yq -p=json -o=json -r '.tags."kaptain.org/managed-by" // ""')
+    if [[ "${managed_by}" != "${project_name}" ]]; then
+      fail "${yaml_file}: pod-identity '${pi_key}' missing or wrong kaptain.org/managed-by tag (got: '${managed_by}', expected: '${project_name}')"
+    fi
+
+    # Check 5: no permissionPolicy / roleName regression (build never emits either).
+    has_pp=$(echo "${assoc}" | yq -p=json -o=json -r 'has("permissionPolicy")')
+    has_rn=$(echo "${assoc}" | yq -p=json -o=json -r 'has("roleName")')
+    if [[ "${has_pp}" == "true" ]]; then
+      fail "${yaml_file}: pod-identity '${pi_key}' has 'permissionPolicy' - must not be present (build never emits it)"
+    fi
+    if [[ "${has_rn}" == "true" ]]; then
+      fail "${yaml_file}: pod-identity '${pi_key}' has 'roleName' - must not be present in emitted cluster.yaml (build only emits roleARN)"
+    fi
+
+    log "  ${pi_key} (${pi_mode}): ${arn}"
+  done
+}
+
 # === Main ===
 
 main() {
@@ -677,9 +774,12 @@ main() {
     log "--- Phase 1: Validating substituted files in ${context_dir} ---"
 
     validate_substituted_yaml "${context_dir}/cluster.yaml"
+    validate_pod_identity_associations "${context_dir}/cluster.yaml"
 
     if [[ -f "${context_dir}/cluster-controlplane-only.yaml" ]]; then
       validate_substituted_yaml "${context_dir}/cluster-controlplane-only.yaml"
+      # pod-identity check intentionally skipped for controlplane-only:
+      # no nodes -> no agent -> no associations, by design.
     fi
   done
 
