@@ -24,16 +24,19 @@ mkdir -p "${PROJECT_ROOT}/${OUTPUT_SUB_PATH}/test"
 
 cd "${TEST_DIR}"
 
-if command -v bats >/dev/null 2>&1; then
-  bats ./*.bats
-elif command -v docker >/dev/null 2>&1; then
-  docker run --rm \
-    -v "${PROJECT_ROOT}:/workspace" \
-    -w /workspace/src/test \
-    -e "PROJECT_ROOT=/workspace" \
-    "bats/bats:1.13.0" \
-    --tap ./*.bats
-else
-  echo "ERROR: neither bats nor docker available" >&2
+# bats must run on the host, not in an isolated container: the tests shell out
+# to yq (and other host tools the build system already validates), which an
+# alpine bats image would not carry. If bats is missing, install it (Ubuntu with
+# passwordless sudo); macOS dev machines already have it via Homebrew.
+if ! command -v bats >/dev/null 2>&1; then
+  echo "bats not found - installing via apt (Ubuntu)..."
+  sudo apt-get update -qq
+  sudo apt-get install -y -qq bats
+fi
+
+if ! command -v bats >/dev/null 2>&1; then
+  echo "ERROR: bats is not available and could not be installed" >&2
   exit 1
 fi
+
+bats ./*.bats
