@@ -1602,7 +1602,7 @@ YAML
 
   local content
   content=$(< "$OUTPUT_SUB_PATH/docker-linux-amd64/substituted/Dockerfile")
-  assert_contains "$content" "FROM ghcr.io/kube-kaptain/aws/aws-eks-cluster-management:" "Dockerfile"
+  assert_contains "$content" "FROM ghcr.io/kube-kaptain/image/image-aws-eks-cluster-management:" "Dockerfile"
 }
 
 @test "generated Dockerfile copies cluster.yaml" {
@@ -2173,7 +2173,7 @@ YAML
   use_dataset "base"
   [ "$status" -eq 0 ]
 
-  assert_output_contains "Base image: ghcr.io/kube-kaptain/aws/aws-eks-cluster-management:"
+  assert_output_contains "Base image: ghcr.io/kube-kaptain/image/image-aws-eks-cluster-management:"
 }
 
 @test "outputs completion message" {
