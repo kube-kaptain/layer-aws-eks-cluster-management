@@ -22,6 +22,11 @@ esac
 TEST_TARGET_DIR="${PROJECT_ROOT}/${OUTPUT_SUB_PATH}/test"
 SCRIPTS_STAGE_DIR="${PROJECT_ROOT}/${OUTPUT_SUB_PATH}/test-fixtures"
 SCRIPTS_DIR="${SCRIPTS_STAGE_DIR}/main"
+
+# The layer scripts source buildon defaults/libs via ${BUILD_SCRIPTS_DIR}. Point
+# it at the staged fixture tree so tests resolve the stubs (never a real buildon
+# checkout). Forced, not defaulted: tests must always use the fixtures.
+export BUILD_SCRIPTS_DIR="${SCRIPTS_STAGE_DIR}"
 MOCK_BIN_DIR="${TEST_TARGET_DIR}/$(basename "${BATS_TEST_FILENAME:-unknown}" .bats)/mock-bin"
 
 _TEST_DIR_COUNTER=0
@@ -39,7 +44,9 @@ _stage_layer_scripts() {
     chmod +x "${SCRIPTS_DIR}/${name}"
   done
 
-  cp "${layer_dir}/aws-eks-cluster-management-defaults.bash" "${SCRIPTS_STAGE_DIR}/defaults/aws-eks-cluster-management.bash"
+  # Layer scripts source their own defaults co-located (${SCRIPT_DIR}/aws-eks-cluster-management-defaults.bash),
+  # so stage the layer defaults next to the scripts in main/, not under defaults/.
+  cp "${layer_dir}/aws-eks-cluster-management-defaults.bash" "${SCRIPTS_DIR}/aws-eks-cluster-management-defaults.bash"
   cp "${fixtures_dir}/defaults/"*.bash "${SCRIPTS_STAGE_DIR}/defaults/"
   cp "${fixtures_dir}/lib/"*.bash "${SCRIPTS_STAGE_DIR}/lib/"
 }
