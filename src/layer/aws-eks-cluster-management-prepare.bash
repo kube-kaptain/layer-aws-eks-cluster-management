@@ -80,7 +80,7 @@
 # Inputs (environment variables / switches):
 #   EKS_BASE_IMAGE_REGISTRY    - Base image registry (default: ghcr.io)
 #   EKS_BASE_IMAGE_NAMESPACE   - Base image namespace (default: kube-kaptain)
-#   EKS_BASE_IMAGE_NAME        - Base image name (default: aws/aws-eks-cluster-management)
+#   EKS_BASE_IMAGE_NAME        - Base image name (default: image/image-aws-eks-cluster-management)
 #   EKS_BASE_IMAGE_TAG         - Base image tag (default: <see defaults script for current>)
 #   EKS_PRIVATE_NETWORKING     - Include private subnets section (default: true)
 #   EKS_PUBLIC_NETWORKING      - Include public subnets section (default: false)
