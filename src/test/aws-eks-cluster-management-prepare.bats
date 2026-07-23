@@ -2424,6 +2424,130 @@ YAML
   [[ "$prefix_val" == *"-1-kong" ]]
 }
 
+# === Nodegroup instanceTypes (multiple, managed-only) ===
+
+@test "emits instanceTypes list when NodegroupInstanceTypes set on managed base" {
+  rm "$CONFIG_SUB_PATH/NodegroupInstanceType"
+  printf 'r5a.2xlarge,r6a.2xlarge' > "$CONFIG_SUB_PATH/NodegroupInstanceTypes"
+
+  run "$SCRIPTS_DIR/aws-eks-cluster-management-prepare"
+  [ "$status" -eq 0 ]
+
+  local content
+  content=$(< "$OUTPUT_SUB_PATH/docker/substituted/cluster.yaml")
+  assert_contains "$content" "instanceTypes:" "cluster.yaml"
+  assert_contains "$content" '- ${NodegroupInstanceTypesKaptainDefaultNg1}' "cluster.yaml"
+  assert_contains "$content" '- ${NodegroupInstanceTypesKaptainDefaultNg2}' "cluster.yaml"
+  [[ "$content" != *'instanceType: ${'* ]]
+}
+
+@test "expands NodegroupInstanceTypes to numbered token files" {
+  rm "$CONFIG_SUB_PATH/NodegroupInstanceType"
+  printf 'r5a.2xlarge,r6a.2xlarge' > "$CONFIG_SUB_PATH/NodegroupInstanceTypes"
+
+  run "$SCRIPTS_DIR/aws-eks-cluster-management-prepare"
+  [ "$status" -eq 0 ]
+
+  [ "$(< "$OUTPUT_SUB_PATH/docker/config/NodegroupInstanceTypesKaptainDefaultNg1")" = "r5a.2xlarge" ]
+  [ "$(< "$OUTPUT_SUB_PATH/docker/config/NodegroupInstanceTypesKaptainDefaultNg2")" = "r6a.2xlarge" ]
+}
+
+@test "writes instance-type mode and count to expected-values (multi)" {
+  rm "$CONFIG_SUB_PATH/NodegroupInstanceType"
+  printf 'r5a.2xlarge,r6a.2xlarge' > "$CONFIG_SUB_PATH/NodegroupInstanceTypes"
+
+  run "$SCRIPTS_DIR/aws-eks-cluster-management-prepare"
+  [ "$status" -eq 0 ]
+
+  local ev="$OUTPUT_SUB_PATH/aws-eks-cluster-management/expected-values"
+  [ "$(< "$ev/instance-type-mode-kaptaindefaultng")" = "multi" ]
+  [ "$(< "$ev/instance-types-count-kaptaindefaultng")" = "2" ]
+}
+
+@test "single NodegroupInstanceType still emits instanceType (regression)" {
+  run "$SCRIPTS_DIR/aws-eks-cluster-management-prepare"
+  [ "$status" -eq 0 ]
+
+  local content
+  content=$(< "$OUTPUT_SUB_PATH/docker/substituted/cluster.yaml")
+  assert_contains "$content" 'instanceType: ${NodegroupInstanceTypeKaptainDefaultNg}' "cluster.yaml"
+  [[ "$content" != *"instanceTypes:"* ]]
+}
+
+@test "trims whitespace around NodegroupInstanceTypes entries" {
+  rm "$CONFIG_SUB_PATH/NodegroupInstanceType"
+  printf 'r5a.2xlarge, r6a.2xlarge' > "$CONFIG_SUB_PATH/NodegroupInstanceTypes"
+
+  run "$SCRIPTS_DIR/aws-eks-cluster-management-prepare"
+  [ "$status" -eq 0 ]
+
+  [ "$(< "$OUTPUT_SUB_PATH/docker/config/NodegroupInstanceTypesKaptainDefaultNg2")" = "r6a.2xlarge" ]
+}
+
+@test "fails when both NodegroupInstanceType and NodegroupInstanceTypes set (base)" {
+  printf 'r5a.2xlarge,r6a.2xlarge' > "$CONFIG_SUB_PATH/NodegroupInstanceTypes"
+
+  run "$SCRIPTS_DIR/aws-eks-cluster-management-prepare"
+  [ "$status" -ne 0 ]
+  assert_output_contains "mutually exclusive"
+}
+
+@test "fails when neither NodegroupInstanceType nor NodegroupInstanceTypes set (base)" {
+  rm "$CONFIG_SUB_PATH/NodegroupInstanceType"
+
+  run "$SCRIPTS_DIR/aws-eks-cluster-management-prepare"
+  [ "$status" -ne 0 ]
+  assert_output_contains "NODEGROUP_INSTANCE_TYPE"
+  assert_output_contains "is required"
+}
+
+@test "fails when NodegroupInstanceTypes used with unmanaged nodegroup" {
+  rm "$CONFIG_SUB_PATH/NodegroupInstanceType"
+  printf 'r5a.2xlarge,r6a.2xlarge' > "$CONFIG_SUB_PATH/NodegroupInstanceTypes"
+  printf 'unmanaged' > "$CONFIG_SUB_PATH/NodegroupType"
+
+  run "$SCRIPTS_DIR/aws-eks-cluster-management-prepare"
+  [ "$status" -ne 0 ]
+  assert_output_contains "instancesDistribution"
+}
+
+@test "per-suffix NodegroupInstanceTypes override emits instanceTypes for that nodegroup" {
+  printf 'kong' > "$CONFIG_SUB_PATH/AdditionalNodegroups"
+  printf 'r5a.2xlarge,r6a.2xlarge' > "$CONFIG_SUB_PATH/NodegroupInstanceTypesKong"
+
+  run "$SCRIPTS_DIR/aws-eks-cluster-management-prepare"
+  [ "$status" -eq 0 ]
+
+  local content
+  content=$(< "$OUTPUT_SUB_PATH/docker/substituted/cluster.yaml")
+  assert_contains "$content" '- ${NodegroupInstanceTypesKong1}' "cluster.yaml"
+  assert_contains "$content" 'instanceType: ${NodegroupInstanceTypeKaptainDefaultNg}' "cluster.yaml"
+}
+
+@test "additional nodegroup inherits base multi instanceTypes" {
+  rm "$CONFIG_SUB_PATH/NodegroupInstanceType"
+  printf 'r5a.2xlarge,r6a.2xlarge' > "$CONFIG_SUB_PATH/NodegroupInstanceTypes"
+  printf 'kong' > "$CONFIG_SUB_PATH/AdditionalNodegroups"
+
+  run "$SCRIPTS_DIR/aws-eks-cluster-management-prepare"
+  [ "$status" -eq 0 ]
+
+  local content
+  content=$(< "$OUTPUT_SUB_PATH/docker/substituted/cluster.yaml")
+  assert_contains "$content" '- ${NodegroupInstanceTypesKong1}' "cluster.yaml"
+  assert_contains "$content" '- ${NodegroupInstanceTypesKong2}' "cluster.yaml"
+}
+
+@test "fails when both single and multi instance type set for same suffix" {
+  printf 'kong' > "$CONFIG_SUB_PATH/AdditionalNodegroups"
+  printf 't3.large' > "$CONFIG_SUB_PATH/NodegroupInstanceTypeKong"
+  printf 'r5a.2xlarge,r6a.2xlarge' > "$CONFIG_SUB_PATH/NodegroupInstanceTypesKong"
+
+  run "$SCRIPTS_DIR/aws-eks-cluster-management-prepare"
+  [ "$status" -ne 0 ]
+  assert_output_contains "mutually exclusive"
+}
+
 @test "rejects suffix starting with hyphen" {
   printf '%s' '-kong' > "$CONFIG_SUB_PATH/AdditionalNodegroups"
 

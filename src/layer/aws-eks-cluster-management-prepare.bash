@@ -17,7 +17,10 @@
 #   KUBERNETES_MINOR_VERSION    - K8s minor version
 #   AWS_REGION                  - AWS region (e.g., eu-west-1)
 #   VPC_ID                      - VPC identifier
-#   NODEGROUP_INSTANCE_TYPE     - Node instance type (e.g., t3.medium)
+#   NODEGROUP_INSTANCE_TYPE     - Node instance type, single (e.g., t3.medium)
+#                                 Mutually exclusive with NODEGROUP_INSTANCE_TYPES; exactly one required
+#   NODEGROUP_INSTANCE_TYPES    - Node instance types, comma-separated for a multi-type nodegroup
+#                                 (e.g., r5a.2xlarge,r6a.2xlarge) - managed nodegroups only
 #   SECRETS_ENCRYPTION_KEY_ARN  - KMS key ARN for envelope encryption of Kubernetes secrets
 #   AWS_ACCOUNT_ID              - AWS account ID (e.g., 123456789012)
 #   CLUSTER_SECURITY_GROUP      - EKS cluster default security group ID (from EKS console Networking tab)
@@ -406,6 +409,9 @@ expand_comma_list_token() {
 
   for idx in $(seq 1 "${expanded_count}"); do
     local item="${items[$((idx - 1))]}"
+    # Trim surrounding whitespace so "a, b" yields "a" and "b", not "a" and " b"
+    item="${item#"${item%%[![:space:]]*}"}"
+    item="${item%"${item##*[![:space:]]}"}"
     local numbered_name="${singular_base}_${idx}"
     local numbered_config_name
     numbered_config_name=$(convert_token_name "${TOKEN_NAME_STYLE}" "${numbered_name}")
@@ -446,7 +452,31 @@ resolve_token "KUBERNETES_MINOR_VERSION"
 resolve_token "EKS_ADDONS_LIST" "${EKS_ADDONS_LIST}"
 resolve_token "AWS_REGION"
 resolve_token "VPC_ID"
-resolve_token "NODEGROUP_INSTANCE_TYPE"
+# Instance type - exactly one of NODEGROUP_INSTANCE_TYPE (single -> instanceType)
+# or NODEGROUP_INSTANCE_TYPES (comma-separated list -> instanceTypes, managed only)
+# is required. The values are read here for use as per-nodegroup inheritance
+# defaults; the numbered-token expansion for the list form happens per nodegroup.
+base_has_single_instance_type="false"
+base_has_multi_instance_type="false"
+NODEGROUP_INSTANCE_TYPE=""
+NODEGROUP_INSTANCE_TYPES=""
+if has_config_file "NODEGROUP_INSTANCE_TYPE"; then
+  base_has_single_instance_type="true"
+  NODEGROUP_INSTANCE_TYPE=$(< "${CONFIG_SUB_PATH}/${checked_name}")
+  NODEGROUP_INSTANCE_TYPE="${NODEGROUP_INSTANCE_TYPE%$'\n'}"
+fi
+if has_config_file "NODEGROUP_INSTANCE_TYPES"; then
+  base_has_multi_instance_type="true"
+  NODEGROUP_INSTANCE_TYPES=$(< "${CONFIG_SUB_PATH}/${checked_name}")
+  NODEGROUP_INSTANCE_TYPES="${NODEGROUP_INSTANCE_TYPES%$'\n'}"
+fi
+if [[ "${base_has_single_instance_type}" == "true" && "${base_has_multi_instance_type}" == "true" ]]; then
+  log_error "NODEGROUP_INSTANCE_TYPE and NODEGROUP_INSTANCE_TYPES are mutually exclusive - provide one or the other"
+  validation_errors=$((validation_errors + 1))
+elif [[ "${base_has_single_instance_type}" == "false" && "${base_has_multi_instance_type}" == "false" ]]; then
+  log_error "NODEGROUP_INSTANCE_TYPE (single) or NODEGROUP_INSTANCE_TYPES (comma-separated list) is required - add NodegroupInstanceType or NodegroupInstanceTypes to ${CONFIG_SUB_PATH}/"
+  validation_errors=$((validation_errors + 1))
+fi
 resolve_token "SECRETS_ENCRYPTION_KEY_ARN"
 resolve_token "AWS_ACCOUNT_ID"
 resolve_token "CLUSTER_SECURITY_GROUP"
@@ -1175,7 +1205,49 @@ for ng_idx in "${!all_ng_suffixes_lower[@]}"; do
 
   # Inherit always-present fields (defaults from global resolved values)
   # shellcheck disable=SC2154 # NODEGROUP_* vars set dynamically by resolve_token via eval
-  resolve_token "NODEGROUP_INSTANCE_TYPE_${suffix_upper}" "${NODEGROUP_INSTANCE_TYPE}"
+  # Instance type: single (instanceType) or multi (instanceTypes, managed only).
+  # A suffixed override wins; otherwise inherit whichever form the base defined.
+  ng_has_single_it="false"
+  ng_has_multi_it="false"
+  if has_config_file "NODEGROUP_INSTANCE_TYPE_${suffix_upper}"; then ng_has_single_it="true"; fi
+  if has_config_file "NODEGROUP_INSTANCE_TYPES_${suffix_upper}"; then ng_has_multi_it="true"; fi
+  if [[ "${ng_has_single_it}" == "true" && "${ng_has_multi_it}" == "true" ]]; then
+    log_error "NODEGROUP_INSTANCE_TYPE_${suffix_upper} and NODEGROUP_INSTANCE_TYPES_${suffix_upper} are mutually exclusive - provide one or the other"
+    validation_errors=$((validation_errors + 1))
+  fi
+
+  if [[ "${ng_has_multi_it}" == "true" ]]; then
+    ng_it_mode="multi"
+  elif [[ "${ng_has_single_it}" == "true" ]]; then
+    ng_it_mode="single"
+  elif [[ "${base_has_multi_instance_type}" == "true" ]]; then
+    ng_it_mode="multi"
+  else
+    ng_it_mode="single"
+  fi
+
+  if [[ "${ng_it_mode}" == "multi" && "${nodegroup_type}" == "unmanaged" ]]; then
+    log_error "NODEGROUP_INSTANCE_TYPES is not supported for unmanaged nodegroups (use instancesDistribution.instanceTypes instead) - use NODEGROUP_INSTANCE_TYPE for a single type"
+    validation_errors=$((validation_errors + 1))
+  fi
+
+  if [[ "${ng_it_mode}" == "multi" ]]; then
+    if has_config_file "NODEGROUP_INSTANCE_TYPES_${suffix_upper}"; then
+      expand_comma_list_token "NODEGROUP_INSTANCE_TYPES_${suffix_upper}" "NODEGROUP_INSTANCE_TYPES_${suffix_upper}" ""
+    else
+      expand_comma_list_token "NODEGROUP_INSTANCE_TYPES_${suffix_upper}" "NODEGROUP_INSTANCE_TYPES_${suffix_upper}" "${NODEGROUP_INSTANCE_TYPES}"
+    fi
+    printf '%s' "${expanded_count}" > "${expected_values_dir}/instance-types-count-${suffix_lower}"
+    printf 'multi' > "${expected_values_dir}/instance-type-mode-${suffix_lower}"
+  else
+    # shellcheck disable=SC2154 # NODEGROUP_* vars set dynamically by resolve_token via eval
+    if has_config_file "NODEGROUP_INSTANCE_TYPE_${suffix_upper}"; then
+      resolve_token "NODEGROUP_INSTANCE_TYPE_${suffix_upper}"
+    else
+      resolve_token "NODEGROUP_INSTANCE_TYPE_${suffix_upper}" "${NODEGROUP_INSTANCE_TYPE}"
+    fi
+    printf 'single' > "${expected_values_dir}/instance-type-mode-${suffix_lower}"
+  fi
   resolve_token "NODEGROUP_AMI_FAMILY_${suffix_upper}" "${NODEGROUP_AMI_FAMILY}"
   resolve_token "NODEGROUP_VOLUME_SIZE_${suffix_upper}" "${NODEGROUP_VOLUME_SIZE}"
   resolve_token "NODEGROUP_VOLUME_TYPE_${suffix_upper}" "${NODEGROUP_VOLUME_TYPE}"
@@ -1467,7 +1539,19 @@ emit_nodegroup() {
   # Core fields
   echo "  - name: ${t_prefix}"
   echo "    amiFamily: ${t_ami}"
-  echo "    instanceType: ${t_instance}"
+  local it_mode
+  it_mode=$(< "${expected_values_dir}/instance-type-mode${suffix_dash}")
+  if [[ "${it_mode}" == "multi" ]]; then
+    local it_count it_idx it_token
+    it_count=$(< "${expected_values_dir}/instance-types-count${suffix_dash}")
+    echo "    instanceTypes:"
+    for it_idx in $(seq 1 "${it_count}"); do
+      it_token=$(format_canonical_token "${TOKEN_DELIMITER_STYLE}" "${TOKEN_NAME_STYLE}" "NODEGROUP_INSTANCE_TYPES${tk}_${it_idx}")
+      echo "      - ${it_token}"
+    done
+  else
+    echo "    instanceType: ${t_instance}"
+  fi
   echo "    volumeSize: ${t_vol_size}"
   echo "    volumeType: ${t_vol_type}"
   echo "    volumeEncrypted: ${t_vol_enc}"
