@@ -721,13 +721,18 @@ pi_count=0
 if has_config_file "POD_IDENTITY_ASSOCIATIONS"; then
   pi_raw=$(< "${CONFIG_SUB_PATH}/${checked_name}")
   pi_raw="${pi_raw%$'\n'}"
-  IFS=',' read -ra pi_keys_dirty <<< "${pi_raw}"
-  for key in "${pi_keys_dirty[@]}"; do
-    key="${key#"${key%%[![:space:]]*}"}"
-    key="${key%"${key##*[![:space:]]}"}"
-    [[ -z "${key}" ]] && continue
-    pi_keys+=("${key}")
-  done
+  # An empty file must fall through to the zero-keys check below. bash 3.2 errors
+  # on "${arr[@]}" for an empty array under set -u (fatal, then swallowed by the
+  # EXIT trap -> misleading exit 0), so only split+iterate when there is content.
+  if [[ -n "${pi_raw}" ]]; then
+    IFS=',' read -ra pi_keys_dirty <<< "${pi_raw}"
+    for key in "${pi_keys_dirty[@]}"; do
+      key="${key#"${key%%[![:space:]]*}"}"
+      key="${key%"${key##*[![:space:]]}"}"
+      [[ -z "${key}" ]] && continue
+      pi_keys+=("${key}")
+    done
+  fi
   pi_count=${#pi_keys[@]}
 
   if [[ ${pi_count} -eq 0 ]]; then
@@ -735,7 +740,8 @@ if has_config_file "POD_IDENTITY_ASSOCIATIONS"; then
     validation_errors=$((validation_errors + 1))
   fi
 
-  for key in "${pi_keys[@]}"; do
+  for key_idx in "${!pi_keys[@]}"; do
+    key="${pi_keys[${key_idx}]}"
     if [[ ! "${key}" =~ ^[a-z0-9](-?[a-z0-9])*$ ]]; then
       log_error "PodIdentityAssociations: key '${key}' must be lowercase alphanumeric with optional hyphens"
       validation_errors=$((validation_errors + 1))
