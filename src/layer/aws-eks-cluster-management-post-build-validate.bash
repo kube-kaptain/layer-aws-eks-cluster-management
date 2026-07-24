@@ -755,6 +755,56 @@ validate_pod_identity_associations() {
   done
 }
 
+# Scan the substituted artifacts for unresolved token remnants and validate the
+# IAM policy JSONs. Runs against the canonical substituted/ copy - a faithful
+# post-substitution snapshot (Phase 2 separately proves the image matches the
+# on-disk substituted files, so scanning the copy is sound). The IAM policy
+# JSONs undergo the same token substitution as cluster.yaml but were previously
+# unscanned: a typo'd or nonexistent token survives verbatim into the image and
+# only fails later at iam:PutRolePolicy. The context dir cannot be scanned
+# wholesale - it also holds the Dockerfile and other non-substituted files whose
+# ${...} would false-positive - which is why we scan this clean copy.
+validate_substituted_artifacts() {
+  local scan_dir="$1"
+
+  log ""
+  log "  --- Substituted artifact token scan ---"
+
+  # Reuse the build-scripts util (single source of truth for remnant detection),
+  # style-aware via the configured delimiter + name styles.
+  local scan_util="${BUILD_SCRIPTS_DIR}/util/scan-unresolved-tokens"
+  if [[ ! -x "${scan_util}" ]]; then
+    fail "scan-unresolved-tokens util not found or not executable at ${scan_util}"
+    return
+  fi
+
+  local remnant_names
+  remnant_names=$("${scan_util}" "${TOKEN_DELIMITER_STYLE}" "${TOKEN_NAME_STYLE}" "${scan_dir}" 2>/dev/null || true)
+
+  if [[ -n "${remnant_names}" ]]; then
+    # Locate the offending files with the same style-aware pattern so the error
+    # names the file, not just the bare token (the util dedups dir-wide).
+    local pattern offenders
+    pattern=$(unresolved_token_regex "${TOKEN_DELIMITER_STYLE}" "${TOKEN_NAME_STYLE}")
+    offenders=$(cd "${scan_dir}" && grep -rlE "${pattern}" . 2>/dev/null | sed 's|^\./||' | LC_ALL=C sort | tr '\n' ' ')
+    fail "unsubstituted token(s) in substituted artifacts: $(echo "${remnant_names}" | tr '\n' ' ')(in: ${offenders})"
+  else
+    log "  unsubstituted tokens: none found in substituted artifacts"
+  fi
+
+  # Every substituted IAM policy JSON must still parse: a substitution that
+  # corrupts structure fails here, not at runtime.
+  local json_file
+  while IFS= read -r json_file; do
+    [[ -z "${json_file}" ]] && continue
+    if ! yq -e -p=json '.' "${json_file}" >/dev/null 2>&1; then
+      fail "${json_file#"${scan_dir}"/}: not valid JSON after substitution"
+    else
+      log "  ${json_file#"${scan_dir}"/}: valid JSON"
+    fi
+  done < <(find "${scan_dir}" -type f -name '*.json' 2>/dev/null)
+}
+
 # === Main ===
 
 main() {
@@ -793,6 +843,22 @@ main() {
     cp "${first_context_dir}/cluster-controlplane-only.yaml" "${substituted_dir}/cluster-controlplane-only.yaml"
     log "  cluster-controlplane-only.yaml: copied to ${substituted_dir}/"
   fi
+
+  # Also stage the substituted IAM policy JSONs (managed-mode associations) into
+  # the clean copy so the artifact scan sees them without also seeing the
+  # Dockerfile and other non-substituted context files.
+  if [[ -d "${first_context_dir}/iam" ]]; then
+    mkdir -p "${substituted_dir}/iam"
+    local iam_json
+    for iam_json in "${first_context_dir}"/iam/*.json; do
+      [[ -e "${iam_json}" ]] || continue
+      cp "${iam_json}" "${substituted_dir}/iam/"
+      log "  iam/$(basename "${iam_json}"): copied to ${substituted_dir}/iam/"
+    done
+  fi
+
+  # Scan the clean substituted copy for token remnants and JSON validity.
+  validate_substituted_artifacts "${substituted_dir}"
 
   # Phase 2: Validate image integrity
   for i in "${!context_dirs[@]}"; do

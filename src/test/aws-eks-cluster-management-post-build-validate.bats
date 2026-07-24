@@ -1053,3 +1053,120 @@ seed_pod_identity_default() {
   [ "$status" -ne 0 ]
   assert_output_contains "pod-identity 'karpenter-aws' missing from substituted cluster.yaml"
 }
+
+# === Pod identity permission policy JSONs: post-substitution scanning ===
+
+# The scan-unresolved-tokens util is real (staged from the build-scripts tree),
+# not a stub. Skip these when the build env cannot supply it.
+require_scan_util() {
+  [[ -f "${BUILD_SCRIPTS_DIR}/util/scan-unresolved-tokens" ]] \
+    || skip "scan-unresolved-tokens util not available in this environment"
+}
+
+@test "post-build: unsubstituted token remnant in iam policy json fails naming the file" {
+  require_scan_util
+  seed_pod_identity_default
+  local context_dir="$OUTPUT_SUB_PATH/docker/substituted"
+  mkdir -p "$context_dir/iam"
+
+  # karpenter-aws is the managed-mode key. Its policy carries a token that was
+  # never substituted - a typo of a real token, exactly the work incident.
+  cat > "$context_dir/iam/karpenter-aws.json" << 'JSON'
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    { "Effect": "Allow", "Action": "ec2:DescribeInstances", "Resource": "arn:aws:iam::${AwsAccontId}:role/thing" }
+  ]
+}
+JSON
+
+  run "$SCRIPTS_DIR/aws-eks-cluster-management-post-build-validate"
+  [ "$status" -ne 0 ]
+  assert_output_contains "iam/karpenter-aws.json"
+  assert_output_contains "AwsAccontId"
+}
+
+@test "post-build: valid substituted iam policy json passes" {
+  require_scan_util
+  seed_pod_identity_default
+  local context_dir="$OUTPUT_SUB_PATH/docker/substituted"
+  mkdir -p "$context_dir/iam"
+
+  cat > "$context_dir/iam/karpenter-aws.json" << 'JSON'
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    { "Effect": "Allow", "Action": "ec2:DescribeInstances", "Resource": "*" }
+  ]
+}
+JSON
+
+  run "$SCRIPTS_DIR/aws-eks-cluster-management-post-build-validate"
+  [ "$status" -eq 0 ]
+  assert_output_contains "all checks passed"
+}
+
+@test "post-build: iam policy variable is not flagged as an unresolved token" {
+  require_scan_util
+  seed_pod_identity_default
+  local context_dir="$OUTPUT_SUB_PATH/docker/substituted"
+  mkdir -p "$context_dir/iam"
+
+  # ${aws:username} and ${aws:PrincipalTag/team} are legitimate IAM policy
+  # variables - lowercase-led with a colon - and must not match the PascalCase
+  # token regex, so the build must not treat them as unresolved remnants.
+  cat > "$context_dir/iam/karpenter-aws.json" << 'JSON'
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": "s3:GetObject",
+      "Resource": "arn:aws:s3:::bucket/${aws:username}/*",
+      "Condition": { "StringEquals": { "aws:PrincipalTag/team": "${aws:PrincipalTag/team}" } }
+    }
+  ]
+}
+JSON
+
+  run "$SCRIPTS_DIR/aws-eks-cluster-management-post-build-validate"
+  [ "$status" -eq 0 ]
+  assert_output_contains "all checks passed"
+}
+
+@test "post-build: unresolved token in iam json is detected under a non-default token style" {
+  require_scan_util
+  export TOKEN_DELIMITER_STYLE="mustache"
+  seed_pod_identity_default
+  local context_dir="$OUTPUT_SUB_PATH/docker/substituted"
+  mkdir -p "$context_dir/iam"
+
+  cat > "$context_dir/iam/karpenter-aws.json" << 'JSON'
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    { "Effect": "Allow", "Action": "sts:AssumeRole", "Resource": "arn:aws:iam::{{ AwsAccontId }}:role/thing" }
+  ]
+}
+JSON
+
+  run "$SCRIPTS_DIR/aws-eks-cluster-management-post-build-validate"
+  [ "$status" -ne 0 ]
+  assert_output_contains "iam/karpenter-aws.json"
+  assert_output_contains "AwsAccontId"
+}
+
+@test "post-build: iam policy json that is not valid json after substitution fails" {
+  require_scan_util
+  seed_pod_identity_default
+  local context_dir="$OUTPUT_SUB_PATH/docker/substituted"
+  mkdir -p "$context_dir/iam"
+
+  # Structurally broken JSON - e.g. a substitution that dropped a closing brace.
+  # No token remnants, so only the JSON-validity check can catch it.
+  printf '%s' '{ "Version": "2012-10-17", "Statement": [ { "Effect": "Allow" ' > "$context_dir/iam/karpenter-aws.json"
+
+  run "$SCRIPTS_DIR/aws-eks-cluster-management-post-build-validate"
+  [ "$status" -ne 0 ]
+  assert_output_contains "not valid JSON after substitution"
+}

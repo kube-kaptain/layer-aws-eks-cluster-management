@@ -23,6 +23,12 @@ TEST_TARGET_DIR="${PROJECT_ROOT}/${OUTPUT_SUB_PATH}/test"
 SCRIPTS_STAGE_DIR="${PROJECT_ROOT}/${OUTPUT_SUB_PATH}/test-fixtures"
 SCRIPTS_DIR="${SCRIPTS_STAGE_DIR}/main"
 
+# Capture any real build-scripts tree the outer build points us at BEFORE we
+# repoint BUILD_SCRIPTS_DIR at the staged fixture tree below. Used only to stage
+# the handful of REAL utils tests genuinely need (a stub can't fake scanning);
+# everything else stays a stub.
+_INCOMING_BUILD_SCRIPTS_DIR="${BUILD_SCRIPTS_DIR:-}"
+
 # The layer scripts source buildon defaults/libs via ${BUILD_SCRIPTS_DIR}. Point
 # it at the staged fixture tree so tests resolve the stubs (never a real buildon
 # checkout). Forced, not defaulted: tests must always use the fixtures.
@@ -49,6 +55,33 @@ _stage_layer_scripts() {
   cp "${layer_dir}/aws-eks-cluster-management-defaults.bash" "${SCRIPTS_DIR}/aws-eks-cluster-management-defaults.bash"
   cp "${fixtures_dir}/defaults/"*.bash "${SCRIPTS_STAGE_DIR}/defaults/"
   cp "${fixtures_dir}/lib/"*.bash "${SCRIPTS_STAGE_DIR}/lib/"
+
+  # Stage the REAL scan-unresolved-tokens util (not a stub): post-build-validate
+  # shells out to it to detect unsubstituted token remnants, and a stub cannot
+  # fake real scanning. Source of truth is the build-scripts tree - the outer
+  # build's BUILD_SCRIPTS_DIR when it points at a real tree, else the
+  # user-scripts repo-root var + src/scripts. The util sources its ../lib and
+  # ../defaults siblings, which resolve to the staged stubs (they carry the
+  # functions it needs). If neither source resolves, the util is not staged and
+  # the tests that need it skip.
+  mkdir -p "${SCRIPTS_STAGE_DIR}/util"
+  # Probe for the real util file itself (not just a util/ dir) and never trust
+  # our own staging dir as the source: BUILD_SCRIPTS_DIR is exported and, across
+  # bats tests, arrives already pointing at the staging tree, which would be a
+  # self-reference back to the empty util/ we just created.
+  local real_scripts_src=""
+  if [[ -n "${_INCOMING_BUILD_SCRIPTS_DIR}" \
+        && "${_INCOMING_BUILD_SCRIPTS_DIR}" != "${SCRIPTS_STAGE_DIR}" \
+        && -f "${_INCOMING_BUILD_SCRIPTS_DIR}/util/scan-unresolved-tokens" ]]; then
+    real_scripts_src="${_INCOMING_BUILD_SCRIPTS_DIR}"
+  elif [[ -n "${KAPTAIN_USER_SCRIPTS_BUILD_SCRIPTS_REPO_ROOT:-}" \
+          && -f "${KAPTAIN_USER_SCRIPTS_BUILD_SCRIPTS_REPO_ROOT}/src/scripts/util/scan-unresolved-tokens" ]]; then
+    real_scripts_src="${KAPTAIN_USER_SCRIPTS_BUILD_SCRIPTS_REPO_ROOT}/src/scripts"
+  fi
+  if [[ -n "${real_scripts_src}" ]]; then
+    cp "${real_scripts_src}/util/scan-unresolved-tokens" "${SCRIPTS_STAGE_DIR}/util/scan-unresolved-tokens"
+    chmod +x "${SCRIPTS_STAGE_DIR}/util/scan-unresolved-tokens"
+  fi
 }
 
 _stage_layer_scripts
