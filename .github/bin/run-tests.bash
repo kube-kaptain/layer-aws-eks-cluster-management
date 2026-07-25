@@ -39,4 +39,16 @@ if ! command -v bats >/dev/null 2>&1; then
   exit 1
 fi
 
+echo "Build scripts location source variable and value:"
+if [[ -n "${BUILD_SCRIPTS_REPO_ROOT:-}" ]]; then
+  echo "  Variable: BUILD_SCRIPTS_REPO_ROOT"
+  echo "  Location: ${BUILD_SCRIPTS_REPO_ROOT}"
+elif [[ -n "${KAPTAIN_USER_SCRIPTS_BUILD_SCRIPTS_REPO_ROOT:-}" ]]; then
+  echo "  Variable: KAPTAIN_USER_SCRIPTS_BUILD_SCRIPTS_REPO_ROOT"
+  echo "  Location: ${KAPTAIN_USER_SCRIPTS_BUILD_SCRIPTS_REPO_ROOT}"
+else
+  echo "Neither variable is set, cannot proceed."
+  exit 42
+fi
+
 bats ./*.bats
