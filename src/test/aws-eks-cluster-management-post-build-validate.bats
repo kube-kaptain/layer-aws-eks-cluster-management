@@ -1056,15 +1056,7 @@ seed_pod_identity_default() {
 
 # === Pod identity permission policy JSONs: post-substitution scanning ===
 
-# The scan-unresolved-tokens util is real (staged from the build-scripts tree),
-# not a stub. Skip these when the build env cannot supply it.
-require_scan_util() {
-  [[ -f "${BUILD_SCRIPTS_DIR}/util/scan-unresolved-tokens" ]] \
-    || skip "scan-unresolved-tokens util not available in this environment"
-}
-
 @test "post-build: unsubstituted token remnant in iam policy json fails naming the file" {
-  require_scan_util
   seed_pod_identity_default
   local context_dir="$OUTPUT_SUB_PATH/docker/substituted"
   mkdir -p "$context_dir/iam"
@@ -1087,7 +1079,6 @@ JSON
 }
 
 @test "post-build: valid substituted iam policy json passes" {
-  require_scan_util
   seed_pod_identity_default
   local context_dir="$OUTPUT_SUB_PATH/docker/substituted"
   mkdir -p "$context_dir/iam"
@@ -1107,7 +1098,6 @@ JSON
 }
 
 @test "post-build: iam policy variable is not flagged as an unresolved token" {
-  require_scan_util
   seed_pod_identity_default
   local context_dir="$OUTPUT_SUB_PATH/docker/substituted"
   mkdir -p "$context_dir/iam"
@@ -1135,7 +1125,6 @@ JSON
 }
 
 @test "post-build: unresolved token in iam json is detected under a non-default token style" {
-  require_scan_util
   export TOKEN_DELIMITER_STYLE="mustache"
   seed_pod_identity_default
   local context_dir="$OUTPUT_SUB_PATH/docker/substituted"
@@ -1157,7 +1146,6 @@ JSON
 }
 
 @test "post-build: iam policy json that is not valid json after substitution fails" {
-  require_scan_util
   seed_pod_identity_default
   local context_dir="$OUTPUT_SUB_PATH/docker/substituted"
   mkdir -p "$context_dir/iam"
