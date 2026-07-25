@@ -49,6 +49,26 @@ _stage_layer_scripts() {
   cp "${layer_dir}/aws-eks-cluster-management-defaults.bash" "${SCRIPTS_DIR}/aws-eks-cluster-management-defaults.bash"
   cp "${fixtures_dir}/defaults/"*.bash "${SCRIPTS_STAGE_DIR}/defaults/"
   cp "${fixtures_dir}/lib/"*.bash "${SCRIPTS_STAGE_DIR}/lib/"
+
+  # Stage the REAL scan-unresolved-tokens util (not a stub): post-build-validate
+  # shells out to it to detect unsubstituted token remnants, and a stub cannot
+  # fake real scanning. Kaptain builds (both local and remote) always set
+  # BUILD_SCRIPTS_REPO_ROOT. Standalone runs may have the user scripts var set:
+  # KAPTAIN_USER_SCRIPTS_BUILD_SCRIPTS_REPO_ROOT. Scripts live under src/scripts.
+  mkdir -p "${SCRIPTS_STAGE_DIR}/util"
+  local real_scripts_root="${BUILD_SCRIPTS_REPO_ROOT:-${KAPTAIN_USER_SCRIPTS_BUILD_SCRIPTS_REPO_ROOT:-}}"
+  local real_util="${real_scripts_root}/src/scripts/util/scan-unresolved-tokens"
+  if [[ -z "${real_scripts_root}" ]]; then
+    echo "ERROR: neither build scripts repo root variable was set!" >&2
+    echo "  set BUILD_SCRIPTS_REPO_ROOT or KAPTAIN_USER_SCRIPTS_BUILD_SCRIPTS_REPO_ROOT to a valid build scripts base dir" >&2
+    exit 42
+  elif [[ ! -f "${real_util}" ]]; then
+    echo "ERROR: scan-unresolved-tokens util not found at '${real_util}'" >&2
+    echo "  set BUILD_SCRIPTS_REPO_ROOT or KAPTAIN_USER_SCRIPTS_BUILD_SCRIPTS_REPO_ROOT to a valid build scripts base dir" >&2
+    exit 42
+  fi
+  cp "${real_util}" "${SCRIPTS_STAGE_DIR}/util/scan-unresolved-tokens"
+  chmod +x "${SCRIPTS_STAGE_DIR}/util/scan-unresolved-tokens"
 }
 
 _stage_layer_scripts
