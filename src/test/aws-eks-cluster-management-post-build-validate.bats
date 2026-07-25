@@ -1170,3 +1170,87 @@ JSON
   [ "$status" -ne 0 ]
   assert_output_contains "not valid JSON after substitution"
 }
+
+# === Multi-arch substituted-content identity ===
+
+# Faithful multi-arch docker mock: each image checksums its OWN arch context
+# dir (as in reality - every image is built from its own context), so Phase 2
+# passes whenever each image matches its build context. This isolates the
+# cross-arch identity check: only a real divergence between an arch's
+# substituted content and the validated canonical copy can fail the build,
+# never a mock artifact.
+setup_multiarch_mock_docker() {
+  export MOCK_DOCKER_CALLS=$(create_test_dir "mock-docker")/calls.log
+  mkdir -p "$MOCK_BIN_DIR"
+  cat > "$MOCK_BIN_DIR/docker" << 'MOCKDOCKER'
+#!/usr/bin/env bash
+echo "$*" >> "$MOCK_DOCKER_CALLS"
+if [[ "$1" == "run" ]]; then
+  ctx="${MOCK_DOCKER_CONTEXT_DIR_LINUX_AMD64}"
+  case "$*" in
+    *-linux-arm64*) ctx="${MOCK_DOCKER_CONTEXT_DIR_LINUX_ARM64}" ;;
+  esac
+  for i in $(seq 1 $#); do
+    arg="${!i}"
+    if [[ "$arg" == "-c" ]]; then
+      next=$((i + 1))
+      cmd="${!next}"
+      if [[ "$cmd" == sha256sum* ]]; then
+        for image_path in ${cmd#sha256sum}; do
+          filename="${image_path##*/}"
+          disk_file="${ctx}/${filename}"
+          if [[ -f "$disk_file" ]]; then
+            checksum=$(sha256sum "$disk_file" | cut -d' ' -f1)
+            echo "${checksum}  ${image_path}"
+          fi
+        done
+        exit 0
+      fi
+    fi
+  done
+  exit 0
+fi
+exit 0
+MOCKDOCKER
+  chmod +x "$MOCK_BIN_DIR/docker"
+  cp "$MOCK_BIN_DIR/docker" "$MOCK_BIN_DIR/podman"
+  chmod +x "$MOCK_BIN_DIR/podman"
+  export PATH="$MOCK_BIN_DIR:$PATH"
+}
+
+# Two arch context dirs seeded from the base (valid) substituted cluster.yaml,
+# plus the faithful multi-arch mock. Both start byte-identical.
+seed_multiarch_contexts() {
+  export DOCKER_PLATFORM="linux/amd64,linux/arm64"
+  local base="$OUTPUT_SUB_PATH/docker/substituted/cluster.yaml"
+  local amd64="$OUTPUT_SUB_PATH/docker-linux-amd64/substituted"
+  local arm64="$OUTPUT_SUB_PATH/docker-linux-arm64/substituted"
+  mkdir -p "$amd64" "$arm64"
+  cp "$base" "$amd64/cluster.yaml"
+  cp "$base" "$arm64/cluster.yaml"
+  export MOCK_DOCKER_CONTEXT_DIR_LINUX_AMD64="$amd64"
+  export MOCK_DOCKER_CONTEXT_DIR_LINUX_ARM64="$arm64"
+  setup_multiarch_mock_docker
+}
+
+@test "post-build: multi-arch substituted content divergence fails" {
+  seed_multiarch_contexts
+  # arm64 substitutes to different bytes than amd64 - which must never happen:
+  # cluster.yaml carries no arch-specific tokens, so all arches must be
+  # identical. The build validates one canonical copy and requires every arch
+  # to match it.
+  yq -i '.metadata.tags.ExtraArmOnly = "oops"' "$OUTPUT_SUB_PATH/docker-linux-arm64/substituted/cluster.yaml"
+
+  run "$SCRIPTS_DIR/aws-eks-cluster-management-post-build-validate"
+  [ "$status" -ne 0 ]
+  assert_output_contains "differs from canonical substituted copy"
+}
+
+@test "post-build: identical multi-arch substituted content passes" {
+  seed_multiarch_contexts
+
+  run "$SCRIPTS_DIR/aws-eks-cluster-management-post-build-validate"
+  [ "$status" -eq 0 ]
+  assert_output_contains "all platform substituted files match the canonical copy"
+  assert_output_contains "all checks passed"
+}

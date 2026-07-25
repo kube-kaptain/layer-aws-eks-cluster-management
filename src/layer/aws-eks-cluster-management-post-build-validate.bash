@@ -805,6 +805,67 @@ validate_substituted_artifacts() {
   done < <(find "${scan_dir}" -type f -name '*.json' 2>/dev/null)
 }
 
+# Stage the substituted artifacts into the canonical copy: the cluster yaml(s)
+# and the managed-mode IAM policy JSONs. This clean copy - holding no Dockerfile
+# or other non-substituted context files - is the single artifact Phase 1
+# validates and Phase 1.5 checks every platform against.
+stage_substituted_copy() {
+  local src_dir="$1" dst_dir="$2"
+
+  mkdir -p "${dst_dir}"
+  # Guard the copy: a missing cluster.yaml must surface as the validator's
+  # graceful "file not found" (Phase 1), not an abrupt cp error under set -e.
+  if [[ -f "${src_dir}/cluster.yaml" ]]; then
+    cp "${src_dir}/cluster.yaml" "${dst_dir}/cluster.yaml"
+    log "  cluster.yaml: copied to ${dst_dir}/"
+  fi
+  if [[ -f "${src_dir}/cluster-controlplane-only.yaml" ]]; then
+    cp "${src_dir}/cluster-controlplane-only.yaml" "${dst_dir}/cluster-controlplane-only.yaml"
+    log "  cluster-controlplane-only.yaml: copied to ${dst_dir}/"
+  fi
+  if [[ -d "${src_dir}/iam" ]]; then
+    mkdir -p "${dst_dir}/iam"
+    local iam_json
+    for iam_json in "${src_dir}"/iam/*.json; do
+      [[ -e "${iam_json}" ]] || continue
+      cp "${iam_json}" "${dst_dir}/iam/"
+      log "  iam/$(basename "${iam_json}"): copied to ${dst_dir}/iam/"
+    done
+  fi
+}
+
+# Phase 1.5: assert every platform's substituted files are byte-identical to the
+# canonical copy Phase 1 validated. cluster.yaml and the IAM JSONs carry no
+# arch-specific tokens, so all platforms MUST substitute to the same bytes - that
+# identity is what makes validating a single copy sufficient. A mismatch is a
+# real divergence (a substitution bug, or an arch-specific token sneaking in) and
+# must fail rather than ship unvalidated content. context_dirs[0] is the copy
+# source, so it always matches; the check bites on the other platforms.
+verify_context_dirs_match_copy() {
+  local copy_dir="$1"
+
+  log ""
+  log "  --- Multi-arch substituted-content identity ---"
+
+  local ctx rel copy_file copy_sum ctx_sum
+  for ctx in "${context_dirs[@]}"; do
+    while IFS= read -r copy_file; do
+      [[ -z "${copy_file}" ]] && continue
+      rel="${copy_file#"${copy_dir}"/}"
+      if [[ ! -f "${ctx}/${rel}" ]]; then
+        fail "${ctx}/${rel}: missing - every platform must carry the substituted artifacts validated in the canonical copy"
+        continue
+      fi
+      copy_sum=$(sha256sum "${copy_file}" | cut -d' ' -f1)
+      ctx_sum=$(sha256sum "${ctx}/${rel}" | cut -d' ' -f1)
+      if [[ "${copy_sum}" != "${ctx_sum}" ]]; then
+        fail "${ctx}/${rel} differs from canonical substituted copy - multi-arch substituted content must be identical (copy: ${copy_sum}, context: ${ctx_sum})"
+      fi
+    done < <(find "${copy_dir}" -type f 2>/dev/null)
+  done
+  log "  all platform substituted files match the canonical copy"
+}
+
 # === Main ===
 
 main() {
@@ -818,47 +879,32 @@ main() {
   log "Expected total nodegroups: ${expected_total_nodegroup_count}"
   log "==================================================="
 
-  # Phase 1: Validate substituted files on disk
-  for context_dir in "${context_dirs[@]}"; do
-    log ""
-    log "--- Phase 1: Validating substituted files in ${context_dir} ---"
-
-    validate_substituted_yaml "${context_dir}/cluster.yaml"
-    validate_pod_identity_associations "${context_dir}/cluster.yaml"
-
-    if [[ -f "${context_dir}/cluster-controlplane-only.yaml" ]]; then
-      validate_substituted_yaml "${context_dir}/cluster-controlplane-only.yaml"
-      # pod-identity check intentionally skipped for controlplane-only:
-      # no nodes -> no agent -> no associations, by design.
-    fi
-  done
-
-  # Copy substituted cluster yamls to canonical dir for diff/inspection
+  # Build the canonical substituted copy FIRST - it is the single artifact we
+  # validate. Multi-arch context dirs are byte-identical by construction
+  # (cluster.yaml and the IAM JSONs carry no arch-specific tokens), so we
+  # validate this one copy once instead of re-validating identical content per
+  # platform, then assert (Phase 1.5) that every platform matches it.
   local substituted_dir="${canonical_dir}/substituted"
-  mkdir -p "${substituted_dir}"
-  local first_context_dir="${context_dirs[0]}"
-  cp "${first_context_dir}/cluster.yaml" "${substituted_dir}/cluster.yaml"
-  log "  cluster.yaml: copied to ${substituted_dir}/"
-  if [[ -f "${first_context_dir}/cluster-controlplane-only.yaml" ]]; then
-    cp "${first_context_dir}/cluster-controlplane-only.yaml" "${substituted_dir}/cluster-controlplane-only.yaml"
-    log "  cluster-controlplane-only.yaml: copied to ${substituted_dir}/"
-  fi
+  stage_substituted_copy "${context_dirs[0]}" "${substituted_dir}"
 
-  # Also stage the substituted IAM policy JSONs (managed-mode associations) into
-  # the clean copy so the artifact scan sees them without also seeing the
-  # Dockerfile and other non-substituted context files.
-  if [[ -d "${first_context_dir}/iam" ]]; then
-    mkdir -p "${substituted_dir}/iam"
-    local iam_json
-    for iam_json in "${first_context_dir}"/iam/*.json; do
-      [[ -e "${iam_json}" ]] || continue
-      cp "${iam_json}" "${substituted_dir}/iam/"
-      log "  iam/$(basename "${iam_json}"): copied to ${substituted_dir}/iam/"
-    done
+  # Phase 1: Validate the canonical substituted copy (once).
+  log ""
+  log "--- Phase 1: Validating substituted artifacts (canonical copy) ---"
+  validate_substituted_yaml "${substituted_dir}/cluster.yaml"
+  validate_pod_identity_associations "${substituted_dir}/cluster.yaml"
+  if [[ -f "${substituted_dir}/cluster-controlplane-only.yaml" ]]; then
+    validate_substituted_yaml "${substituted_dir}/cluster-controlplane-only.yaml"
+    # pod-identity check intentionally skipped for controlplane-only:
+    # no nodes -> no agent -> no associations, by design.
   fi
-
-  # Scan the clean substituted copy for token remnants and JSON validity.
+  # Token-remnant scan + JSON validity over the clean copy.
   validate_substituted_artifacts "${substituted_dir}"
+
+  # Phase 1.5: prove "validate once" is sound - every platform's substituted
+  # content must be byte-identical to the copy we just validated.
+  log ""
+  log "--- Phase 1.5: Multi-arch substituted-content identity ---"
+  verify_context_dirs_match_copy "${substituted_dir}"
 
   # Phase 2: Validate image integrity
   for i in "${!context_dirs[@]}"; do
