@@ -1,10 +1,10 @@
-apiVersion: kaptain.org/1.23
+apiVersion: kaptain.org/1.29
 kind: layer-and-layerset-build
 metadata:
   description: "AWS EKS cluster management build configuration layer"
 spec:
   layers:
-    - layerset-and-layer-build:[1.4,2.0)
+    - layerset-and-layer-build:[1.7]
   main:
     hooks:
       preTaggingTests: .github/bin/run-tests.bash
