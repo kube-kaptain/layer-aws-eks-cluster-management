@@ -39,10 +39,11 @@ _stage_layer_scripts() {
   mkdir -p "${SCRIPTS_DIR}" "${SCRIPTS_STAGE_DIR}/defaults" "${SCRIPTS_STAGE_DIR}/lib"
 
   local name
-  for name in aws-eks-cluster-management-prepare aws-eks-cluster-management-pre-build-validate aws-eks-cluster-management-post-build-validate; do
+  for name in aws-eks-cluster-management-prepare aws-eks-cluster-management-pre-build-validate aws-eks-cluster-management-post-build-validate aws-eks-cluster-management-github-release-notes; do
     cp "${layer_dir}/${name}.bash" "${SCRIPTS_DIR}/${name}"
     chmod +x "${SCRIPTS_DIR}/${name}"
   done
+  cp "${layer_dir}/aws-eks-cluster-management-github-release-notes.md.template" "${SCRIPTS_DIR}/"
 
   # Layer scripts source their own defaults co-located (${SCRIPT_DIR}/aws-eks-cluster-management-defaults.bash),
   # so stage the layer defaults next to the scripts in main/, not under defaults/.
@@ -50,25 +51,31 @@ _stage_layer_scripts() {
   cp "${fixtures_dir}/defaults/"*.bash "${SCRIPTS_STAGE_DIR}/defaults/"
   cp "${fixtures_dir}/lib/"*.bash "${SCRIPTS_STAGE_DIR}/lib/"
 
-  # Stage the REAL scan-unresolved-tokens util (not a stub): post-build-validate
-  # shells out to it to detect unsubstituted token remnants, and a stub cannot
-  # fake real scanning. Kaptain builds (both local and remote) always set
+  # Stage REAL utils (not stubs): post-build-validate shells out to
+  # scan-unresolved-tokens to detect unsubstituted token remnants, and the
+  # release notes hook uses format-release-image-list (which calls
+  # format-project-title) so its lists match buildon's default release body.
+  # A stub can fake neither. Kaptain builds (both local and remote) always set
   # BUILD_SCRIPTS_REPO_ROOT. Standalone runs may have the user scripts var set:
   # KAPTAIN_USER_SCRIPTS_BUILD_SCRIPTS_REPO_ROOT. Scripts live under src/scripts.
   mkdir -p "${SCRIPTS_STAGE_DIR}/util"
   local real_scripts_root="${BUILD_SCRIPTS_REPO_ROOT:-${KAPTAIN_USER_SCRIPTS_BUILD_SCRIPTS_REPO_ROOT:-}}"
-  local real_util="${real_scripts_root}/src/scripts/util/scan-unresolved-tokens"
   if [[ -z "${real_scripts_root}" ]]; then
     echo "ERROR: neither build scripts repo root variable was set!" >&2
     echo "  set BUILD_SCRIPTS_REPO_ROOT or KAPTAIN_USER_SCRIPTS_BUILD_SCRIPTS_REPO_ROOT to a valid build scripts base dir" >&2
     exit 42
-  elif [[ ! -f "${real_util}" ]]; then
-    echo "ERROR: scan-unresolved-tokens util not found at '${real_util}'" >&2
-    echo "  set BUILD_SCRIPTS_REPO_ROOT or KAPTAIN_USER_SCRIPTS_BUILD_SCRIPTS_REPO_ROOT to a valid build scripts base dir" >&2
-    exit 42
   fi
-  cp "${real_util}" "${SCRIPTS_STAGE_DIR}/util/scan-unresolved-tokens"
-  chmod +x "${SCRIPTS_STAGE_DIR}/util/scan-unresolved-tokens"
+  local util real_util
+  for util in scan-unresolved-tokens format-release-image-list format-project-title; do
+    real_util="${real_scripts_root}/src/scripts/util/${util}"
+    if [[ ! -f "${real_util}" ]]; then
+      echo "ERROR: ${util} util not found at '${real_util}'" >&2
+      echo "  set BUILD_SCRIPTS_REPO_ROOT or KAPTAIN_USER_SCRIPTS_BUILD_SCRIPTS_REPO_ROOT to a valid build scripts base dir" >&2
+      exit 42
+    fi
+    cp "${real_util}" "${SCRIPTS_STAGE_DIR}/util/${util}"
+    chmod +x "${SCRIPTS_STAGE_DIR}/util/${util}"
+  done
 }
 
 _stage_layer_scripts

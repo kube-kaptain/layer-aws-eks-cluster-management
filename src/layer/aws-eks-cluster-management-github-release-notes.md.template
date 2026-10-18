@@ -1,0 +1,16 @@
+Self-contained image for managing this EKS cluster: eksctl, kubectl and the AWS CLI, with the cluster config baked in. Start a shell in it with either of the commands below.
+
+```bash
+podman run -it --rm {{IMAGE_URI}} /bin/bash
+```
+
+```bash
+docker run -it --rm {{IMAGE_URI}} /bin/bash
+```
+
+Automatic release for version {{VERSION}} of {{PROJECT_NAME}} by Kaptain build script.
+
+### Release Assets
+* Release Change Data: [release-change-data-{{VERSION}}.yaml]({{RELEASE_DOWNLOAD_URL}}/release-change-data-{{VERSION}}.yaml)
+* Release Change Data Image: [{{RELEASE_CHANGE_DATA_URI}}](https://{{RELEASE_CHANGE_DATA_URI}})
+{{RELEASE_IMAGE_LIST}}
