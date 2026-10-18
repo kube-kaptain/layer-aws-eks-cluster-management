@@ -13,6 +13,7 @@
 #   format_canonical_token           - Convenience combining both
 #   format_project_suffixed_token    - Combine project name + suffix into delimited token
 #   validate_token_styles            - Validate both styles and exit on error
+#   strip_token_delimiters           - stdin filter: one matched token per line -> bare token name
 #   unresolved_token_regex           - grep-E regex matching unresolved tokens for a given style pair
 
 # Internal: lowercase a string (bash 3.2 compatible)
@@ -136,6 +137,34 @@ unresolved_token_regex() {
     swift)           printf '%s\n' "\\\\\\(${name_regex}\\)" ;;
     *)
       log_error "Unknown delimiter style: ${delim_style}"
+      return 1
+      ;;
+  esac
+}
+
+# Strip delimiters from matched tokens to leave the bare token names. Reads one
+# match per line on stdin (as produced by grep -o with unresolved_token_regex)
+# and writes one name per line.
+# Usage: strip_token_delimiters <delimiter-style>
+strip_token_delimiters() {
+  if [[ $# -ne 1 ]]; then
+    log_error "strip_token_delimiters requires exactly 1 argument, got $#"
+    return 1
+  fi
+
+  case "${1:-}" in
+    shell)           sed 's/^\${\(.*\)}$/\1/' ;;              # ${Name}
+    mustache)        sed 's/^{{ \(.*\) }}$/\1/' ;;            # {{ Name }}
+    helm)            sed 's/^{{ \.Values\.\(.*\) }}$/\1/' ;;  # {{ .Values.Name }}
+    erb)             sed 's/^<%= \(.*\) %>$/\1/' ;;           # <%= Name %>
+    github-actions)  sed 's/^\${{ \(.*\) }}$/\1/' ;;          # ${{ Name }}
+    blade)           sed 's/^{{ \$\(.*\) }}$/\1/' ;;          # {{ $Name }}
+    stringtemplate)  sed 's/^\$\(.*\)\$$/\1/' ;;              # $Name$
+    ognl)            sed 's/^%{\(.*\)}$/\1/' ;;               # %{Name}
+    t4)              sed 's/^<#= \(.*\) #>$/\1/' ;;           # <#= Name #>
+    swift)           sed 's/^\\(\(.*\))$/\1/' ;;              # \(Name)
+    *)
+      log_error "Unknown delimiter style: ${1:-}"
       return 1
       ;;
   esac

@@ -44,6 +44,21 @@ or
       platform: linux/arm64
 ```
 
+## GitHub release notes
+
+On GitHub runners the release body is rendered from
+`aws-eks-cluster-management-github-release-notes.md.template`: a short
+description of the image and copyable `podman run` and `docker run` commands
+for the exact image built, followed by the usual release assets and image
+lists. The release title is unchanged. See
+[GitHubReleasePage.md](src/test/fixtures/release/GitHubReleasePage.md) for a complete page.
+
+The layer sets `spec.platform.githubActions.release.notesFile` to
+`kaptain-out/aws-eks-cluster-management/github-release-notes.md` and renders
+that file in the `prePublish` hook, once every image the release lists has been
+built and tagged. Point `notesFile` at your own file to supply different notes,
+and the layer leaves it alone.
+
 ## Configuring the user hook slots
 
 The orchestrator reads two optional hook paths from the consuming project's

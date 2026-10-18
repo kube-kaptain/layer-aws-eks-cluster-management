@@ -1,4 +1,4 @@
-apiVersion: kaptain.org/1.29
+apiVersion: kaptain.org/1.38
 kind: basic-quality-and-versioning
 metadata:
   description: "AWS EKS cluster management build flow as a postVersionsAndNaming hook"
@@ -6,8 +6,14 @@ spec:
   main:
     hooks:
       postVersionsAndNaming: kaptain-out/aws-eks-cluster-management-orchestrator.bash
+      prePublish: kaptain-out/aws-eks-cluster-management-github-release-notes.bash
     docker:
       platform: linux/amd64,linux/arm64
+  platform:
+    githubActions:
+      release:
+        # Rendered from the layer template by the prePublish hook
+        notesFile: kaptain-out/aws-eks-cluster-management/github-release-notes.md
 layer-payload:
   - source: /aws-eks-cluster-management-orchestrator.bash
     destination: kaptain-out
@@ -18,4 +24,8 @@ layer-payload:
   - source: /aws-eks-cluster-management-pre-build-validate.bash
     destination: kaptain-out
   - source: /aws-eks-cluster-management-post-build-validate.bash
+    destination: kaptain-out
+  - source: /aws-eks-cluster-management-github-release-notes.bash
+    destination: kaptain-out
+  - source: /aws-eks-cluster-management-github-release-notes.md.template
     destination: kaptain-out
